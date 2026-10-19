@@ -1,0 +1,64 @@
+# kuma M0 中间件（爱商汇 38.47.109.16）
+# 依据：Task-Server.md §4.2/§4.3/§5、Task-DataBase.md §2
+# 原则：全部绑 127.0.0.1（不对公网）；每个容器都有 mem_limit；口令在 .env（不入库）
+# 用法：cd /data/kuma_automobile_server/deploy && docker compose up -d
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.5
+    container_name: kuma-postgres
+    restart: always
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: kuma_owner
+      POSTGRES_PASSWORD: ${KUMA_PG_OWNER_PASSWORD}
+      POSTGRES_DB: kuma
+      TZ: UTC
+    volumes:
+      - /data/kuma/pg/data:/var/lib/postgresql/data
+    shm_size: 64m
+    mem_limit: 512m
+    memswap_limit: 512m
+    command: >
+      postgres
+      -c shared_buffers=128MB
+      -c effective_cache_size=384MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=64MB
+      -c max_connections=60
+      -c max_worker_processes=2
+      -c wal_compression=on
+      -c timezone=UTC
+      -c log_min_duration_statement=200ms
+      -c max_wal_size=1GB
+      -c min_wal_size=256MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kuma_owner -d kuma"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    container_name: kuma-rabbitmq
+    restart: always
+    hostname: kuma-rabbitmq
+    ports:
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
+      - "127.0.0.1:1883:1883"
+    environment:
+      RABBITMQ_DEFAULT_USER: kuma_mq
+      RABBITMQ_DEFAULT_PASS: ${KUMA_MQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: /kuma
+    volumes:
+      - /data/kuma/rabbitmq/data:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 20s
+      timeout: 10s
+      retries: 5

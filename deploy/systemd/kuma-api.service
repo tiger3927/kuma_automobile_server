@@ -1,0 +1,24 @@
+[Unit]
+Description=kuma api (FastAPI HTTP+WS)
+After=network-online.target docker.service
+Wants=docker.service
+
+[Service]
+Type=exec
+User=tiger
+Group=tiger
+WorkingDirectory=/data/kuma_automobile_server
+Environment=PATH=/data/tiger/miniconda3/envs/kuma/bin:/usr/local/bin:/usr/bin:/bin
+# runtime.env 由 scripts/gen_systemd_env.sh 从 deploy/.env 组合生成（systemd 不做变量展开）
+EnvironmentFile=/data/kuma_automobile_server/deploy/runtime.env
+ExecStart=/data/tiger/miniconda3/envs/kuma/bin/uvicorn main:app --host 127.0.0.1 --port 8100 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=always
+RestartSec=3
+MemoryMax=350M
+TasksMax=256
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

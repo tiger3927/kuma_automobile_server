@@ -1,0 +1,19 @@
+[Unit]
+Description=kuma worker (jobs + outbox + retention)
+After=network-online.target docker.service
+
+[Service]
+Type=exec
+User=tiger
+Group=tiger
+WorkingDirectory=/data/kuma_automobile_server
+Environment=PATH=/data/tiger/miniconda3/envs/kuma/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/data/kuma_automobile_server/deploy/runtime.env
+ExecStart=/data/tiger/miniconda3/envs/kuma/bin/python worker.py
+Restart=always
+RestartSec=5
+MemoryMax=300M
+TasksMax=256
+
+[Install]
+WantedBy=multi-user.target

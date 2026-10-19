@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 临时测试代码/数据目录
+tests/
+
+# 模拟数据/模拟设备桩目录
+mock/
+
+# CodeGraph 索引
+.codegraph/

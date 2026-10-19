@@ -1,0 +1,81 @@
+[project]
+name = "kuma"
+version = "0.1.0"
+description = "酷马车联网服务后端（api / gateway / worker 三进程同一份代码）"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",   # asyncio extra 带 greenlet，缺它 async engine 直接 ImportError
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "redis>=5.2",
+    "aiomqtt>=2.3",
+    "aio-pika>=9.4",          # AMQP 客户端：outbox 投递 + kuma.cmd.down（Task-Server.md §4.3/§9；原依赖清单缺这一项）
+    "shapely>=2.0",           # 只用 Shapely（自带 GEOS wheel）；禁止 GDAL/pyproj
+    "httpx>=0.28",
+    "pyjwt>=2.10",
+    "pwdlib[argon2]>=0.2",
+    "orjson>=3.10",
+    "structlog>=24.4",
+    "python-multipart>=0.0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "anyio>=4.6",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+# 代码里一律 `from src.kuma...` 导入（三进程都在仓库根启动），
+# 所以打包也要按 `src.*` 收，否则 `pip install -e .` 装出来的包名（kuma）和导入路径（src.kuma）不一致
+where = ["."]
+include = ["src", "src.*"]
+
+[tool.ruff]
+line-length = 120   # 中文注释/SQL 片段按 100 会大量误报；120 是实测能容纳现有写法的下限
+target-version = "py313"
+src = ["src", "tests", "."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "SIM", "RUF"]
+ignore = [
+    "B008",   # FastAPI Depends 在默认参数里是惯例
+    "RUF001", # 中文注释/文档串里的全角标点（，：（）不是 bug，是本文档体系的写法）
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# SQLAlchemy / Pydantic 模型的类级默认值（Mapped[...]=mapped_column(...)、Field(default_factory=...)）
+# 是框架惯例，不是可变默认共享缺陷
+"src/kuma/models/*" = ["RUF012"]
+"src/kuma/schemas/*" = ["RUF012"]
+
+[tool.mypy]
+python_version = "3.13"
+# 仓库根启动、按 `src.kuma.*` 导入 → 不加这个 mypy 会把 src/kuma/... 判成"文件路径无法映射到模块"直接罢工
+explicit_package_bases = true
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "db: 需要真实 PostgreSQL（无 KUMA_DSN 时自动 skip）",
+    "mq: 需要真实 RabbitMQ/Redis（无服务时自动 skip）",
+]
