@@ -6,9 +6,8 @@ Alembic 以现有结构为 baseline（`alembic stamp head`），此后结构改�
 
 from __future__ import annotations
 
-from sqlalchemy import Text, func, text
+from sqlalchemy import Text, TypeDecorator, func, text
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.type_api import TypeDecorator
 
 
 class Base(DeclarativeBase):
