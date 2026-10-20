@@ -36,7 +36,8 @@ class MqttGateway:
     async def run(self) -> None:
         await self.inbound.start()
         async with aiomqtt.Client(
-            self.s.mqtt_url,
+            self.s.mqtt_host,
+            port=self.s.mqtt_port,
             username=self.s.mqtt_user,
             password=self.s.mqtt_password or None,
             identifier="kuma-gateway",

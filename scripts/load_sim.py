@@ -12,6 +12,7 @@ import asyncio
 import json
 import random
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 import aiomqtt
 
@@ -19,7 +20,10 @@ import aiomqtt
 async def run(args: argparse.Namespace) -> None:
     vins = [f"SIM{1000000000 + i}" for i in range(args.vehicles)]
     sent = 0
-    async with aiomqtt.Client(args.url, username=args.user, password=args.password or None,
+    # aiomqtt 2.x 的第一个参数是主机名，不是 URL（见 core/config.py:mqtt_host）
+    parsed = urlparse(args.url)
+    async with aiomqtt.Client(parsed.hostname or "127.0.0.1", port=parsed.port or 1883,
+                              username=args.user, password=args.password or None,
                               identifier="kuma-load-sim") as client:
         while sent < args.seconds * args.vehicles:
             batch = []

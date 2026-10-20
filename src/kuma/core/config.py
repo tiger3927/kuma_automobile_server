@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -82,6 +83,20 @@ class Settings(BaseSettings):
     @property
     def is_prod(self) -> bool:
         return self.kuma_env == "prod"
+
+    @property
+    def mqtt_host(self) -> str:
+        """aiomqtt 2.x 把第一个参数当**主机名**（不再解析 URL）→ 必须在这里拆好。
+
+        2026-10-20 实测：直接把 `mqtt://127.0.0.1:1883` 传给 `aiomqtt.Client()`
+        会被当主机名去做 DNS，报 `[Errno -2] Name or service not known`。
+        """
+        return urlparse(self.mqtt_url).hostname or "127.0.0.1"
+
+    @property
+    def mqtt_port(self) -> int:
+        parsed = urlparse(self.mqtt_url)
+        return parsed.port or (8883 if parsed.scheme == "mqtts" else 1883)
 
 
 @lru_cache
