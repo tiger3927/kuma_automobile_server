@@ -23,7 +23,10 @@ OUT=deploy/runtime.env
   echo "KUMA_REDIS_URL=${KUMA_REDIS_URL:-redis://127.0.0.1:6379/5}"
   echo "KUMA_AMQP_URL=amqp://kuma_mq:${KUMA_MQ_PASSWORD}@127.0.0.1:5672/%2Fkuma"
   echo "KUMA_MQTT_URL=mqtt://127.0.0.1:1883"
-  echo "KUMA_MQTT_USER=kuma_mq"
+  # MQTT 用户名带 vhost 前缀：插件在 CONNECT 的 host 字段为空时默认落到 vhost '/'，
+  # 而本机只有 /kuma → 裸 kuma_mq 会被拒成 134（Bad user name or password）。
+  # AMQP 侧（KUMA_AMQP_URL）仍用裸 kuma_mq。2026-10-20 实测：/kuma:kuma_mq 连上。
+  echo "KUMA_MQTT_USER=/kuma:kuma_mq"
   echo "KUMA_MQTT_PASSWORD=${KUMA_MQ_PASSWORD}"
   echo "KUMA_JWT_SECRET=${KUMA_JWT_SECRET}"
 } > "$OUT"
