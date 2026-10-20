@@ -1,6 +1,11 @@
 """电子围栏判定（PostGIS，GiST 索引在 `geo.fence.geom`）。
 
 运营商获准经营区域是派单硬过滤条件（Task-Plan.md §8.4）；禁行区与告警区走 worker 规则。
+
+⚠️ 包含判定走 **geometry 平面**，不走 geography：PostGIS 的 `ST_Contains` 没有 geography 重载
+（2026-10-20 实测 `function st_contains(geography, geography) does not exist`，这条查询在
+有围栏数据后必然报错，此前因为从没建过围栏而没暴露）。围栏是城市尺度，经纬度平面判定的
+误差可忽略；**距离**计算仍走 geography（见 `distance_to_fence`）。
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ async def fences_containing(lon: float, lon_lat: float | None = None, *, lat: fl
         SELECT f.id, f.name, f.fence_type, f.org_id, f.region_id
         FROM geo.fence f
         WHERE f.status = 'active'
-          AND ST_Contains(f.geom::geography, ST_SetSRID(ST_MakePoint(:lon, :lat)::geometry, 4326)::geography)
+          AND ST_Contains(f.geom, ST_SetSRID(ST_MakePoint(:lon, :lat)::geometry, 4326))
           AND (f.active_from IS NULL OR f.active_from <= now())
           AND (f.active_to IS NULL OR f.active_to >= now())
     """
