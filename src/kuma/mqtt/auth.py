@@ -85,17 +85,23 @@ def topic_allowed(username: str, permission: str, routing_key: str) -> bool:
 
 def resource_allowed(username: str, client_id: str, resource: str, name: str,
                      permission: str) -> bool:
-    """MQTT 插件会为每个连接声明**自己的**队列（持久会话用 client_id，临时会话用 `session-…`）。
+    """只允许设备动**自己的**队列；别的资源一律拒。
 
-    只允许动自己的队列；别的资源（`kuma.cmd.down`、声明 exchange、别人的队列）一律拒。
+    2026-10-20 PoC 实测到的真实队列名（RabbitMQ MQTT 插件）：
+      订阅队列  `mqtt-subscription-<client_id>qos0`（QoS1 是 `qos1`）
+      会话队列  `session-<client_id>` / 临时会话随机名
+    ⚠️ **exchange 写必须保持拒**：插件在 topic 判定拒绝后会回落到 exchange 级检查
+    （日志 `MQTT resource access refused: write access to exchange 'amq.topic'`）。
+    若在这里放行 amq.topic，跨 topic 发布就会经这条回落路径漏过去——topic ACL 直接失效。
     """
     if not username or resource != "queue":
         return False
     if name.startswith("kuma."):          # 服务端队列是 gateway（internal 用户）的事
         return False
-    if client_id and (name == client_id or name.startswith(f"session-{client_id}")
-                      or name.startswith(f"{client_id}-")):
+    if client_id and (name == client_id or name.startswith(
+            (f"session-{client_id}", f"mqtt-subscription-{client_id}", f"{client_id}-"))):
         return True
+    # 临时/自动生成的队列名带随机后缀，别人猜不到，允许（跨连接无法复用）
     return name.startswith(("session-", "amq.gen-"))
 
 
