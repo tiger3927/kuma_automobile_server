@@ -51,7 +51,9 @@ class MqttGateway:
             # MQTT 就绪后才接 AMQP 下行队列，避免指令发到没有 MQTT 连接的进程
             from ..core.bus import Q_CMD_DOWN, get_bus
 
-            await get_bus().consume(Q_CMD_DOWN, self._outbound.handle)
+            # passive=True：队列已由 Bus.connect() 带 x-message-ttl 声明过，
+            # 再裸声明会 PRECONDITION_FAILED（见 core/bus.py:consume）
+            await get_bus().consume(Q_CMD_DOWN, self._outbound.handle, passive=True)
             log.info("gateway.cmd_queue_bound", queue=Q_CMD_DOWN)
             self._tasks.append(asyncio.create_task(loop_retry(), name="cmd-retry-sweep"))
             async for message in client.messages:

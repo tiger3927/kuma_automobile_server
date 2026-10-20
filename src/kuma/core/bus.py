@@ -101,8 +101,14 @@ class Bus:
         )
 
     async def consume(self, queue: str, handler: Callable[[dict[str, Any]], Awaitable[None]],
-                      *, concurrency: int = 50) -> AbstractQueue:
-        q = await self.channel.declare_queue(queue, durable=True)
+                      *, concurrency: int = 50, passive: bool = False) -> AbstractQueue:
+        """passive=True 只查不建。
+
+        重复声明时 arguments 必须与既有队列**完全一致**：`connect()` 给 `kuma.cmd.down`
+        带了 `x-message-ttl`，这里再裸声明就 `PRECONDITION_FAILED - inequivalent arg
+        'x-message-ttl'`（2026-10-20 gateway 首次真连 MQ 时崩在这里，systemd 无限重启）。
+        """
+        q = await self.channel.declare_queue(queue, durable=True, passive=passive)
         await q.consume(self._wrap(handler), no_ack=False)
         await self.channel.set_qos(prefetch_count=concurrency)
         return q
