@@ -15,6 +15,7 @@ from ..core.exceptions import register_handlers
 from ..core.lifespan import lifespan
 from ..core.middleware import RateLimit, RequestContext
 from ..core.redis_client import healthcheck as redis_health
+from ..mqtt import auth as mqtt_auth
 from ..realtime.manager import manager
 from .v1 import api_router
 
@@ -39,6 +40,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_handlers(app)
 
     app.include_router(api_router, prefix="/api/v1")
+
+    if s.mq_auth_token:
+        # RabbitMQ `rabbitmq_auth_backend_http` 的回调入口（T1，见 mqtt/auth.py）。
+        # 路径里带随机段：8100 被 nginx 全量反代到公网，不带 token 的调用只会拿到 404，
+        # 这个端点不会被人当"口令探针"枚举。token 只落在 root-only 的 rabbitmq.conf 与 runtime.env。
+        # 故意不进 RateLimit 规则：topic 权限每次 publish 都要判一次（1000 台 @5s ≈ 200 次/秒）。
+        app.include_router(mqtt_auth.router, prefix=f"/internal/mqtt-auth/{s.mq_auth_token}")
 
     @app.get("/healthz")
     async def healthz() -> dict:

@@ -52,6 +52,9 @@ services:
       RABBITMQ_DEFAULT_USER: kuma_mq
       RABBITMQ_DEFAULT_PASS: ${KUMA_MQ_PASSWORD}
       RABBITMQ_DEFAULT_VHOST: /kuma
+      # rabbitmq.conf 里用 $(KUMA_MQ_AUTH_TOKEN) 插值出 HTTP auth 回调路径（T1）。
+      # 值只在 deploy/.env（不入库、公开仓库看不到），来源见 scripts/gen_systemd_env.sh。
+      KUMA_MQ_AUTH_TOKEN: ${KUMA_MQ_AUTH_TOKEN}
     volumes:
       - /data/kuma/rabbitmq/data:/var/lib/rabbitmq
       - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro

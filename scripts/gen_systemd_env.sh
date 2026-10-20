@@ -11,6 +11,13 @@ if ! grep -q '^KUMA_JWT_SECRET=' deploy/.env; then
   echo "KUMA_JWT_SECRET=${SECRET}" >> deploy/.env
   echo "已生成并写入 deploy/.env 的 KUMA_JWT_SECRET"
 fi
+# MQTT 认证端点的路径密钥（T1）。api 与 rabbitmq.conf 必须用同一个值：
+# 8100 被 nginx 全量反代到公网，路径里没有这段就 404，端点不会被人当口令探针枚举。
+if ! grep -q '^KUMA_MQ_AUTH_TOKEN=' deploy/.env; then
+  TOKEN="$(head -c 24 /dev/urandom | base64 | tr -d '/+=')"
+  echo "KUMA_MQ_AUTH_TOKEN=${TOKEN}" >> deploy/.env
+  echo "已生成并写入 deploy/.env 的 KUMA_MQ_AUTH_TOKEN（要同步进 rabbitmq.conf 的四个 URL）"
+fi
 set -a; . deploy/.env; set +a
 
 umask 077
@@ -28,6 +35,8 @@ OUT=deploy/runtime.env
   # AMQP 侧（KUMA_AMQP_URL）仍用裸 kuma_mq。2026-10-20 实测：/kuma:kuma_mq 连上。
   echo "KUMA_MQTT_USER=/kuma:kuma_mq"
   echo "KUMA_MQTT_PASSWORD=${KUMA_MQ_PASSWORD}"
+  echo "KUMA_MQTT_VHOST=/kuma"
+  echo "KUMA_MQ_AUTH_TOKEN=${KUMA_MQ_AUTH_TOKEN}"
   echo "KUMA_JWT_SECRET=${KUMA_JWT_SECRET}"
 } > "$OUT"
 chmod 600 "$OUT"

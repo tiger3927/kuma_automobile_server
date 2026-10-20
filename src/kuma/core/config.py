@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     mqtt_url: str = Field("mqtt://127.0.0.1:1883", alias="KUMA_MQTT_URL")
     mqtt_user: str = Field("kuma_mq", alias="KUMA_MQTT_USER")
     mqtt_password: str = Field("", alias="KUMA_MQTT_PASSWORD")
+    mqtt_vhost: str = Field("/kuma", alias="KUMA_MQTT_VHOST")
+    # RabbitMQ HTTP auth 的对接路径密钥：空 = 不挂载 /internal/mqtt-auth/*。
+    # 8100 被 nginx 全量反代到公网，路径里带随机段才不会被人当凭据探针枚举（见 api/app.py）。
+    mq_auth_token: str = Field("", alias="KUMA_MQ_AUTH_TOKEN")
 
     # 鉴权
     jwt_secret: str = Field("dev-only-secret-change-me", alias="KUMA_JWT_SECRET")
