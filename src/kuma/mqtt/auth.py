@@ -87,14 +87,22 @@ def resource_allowed(username: str, client_id: str, resource: str, name: str,
                      permission: str) -> bool:
     """只允许设备动**自己的**队列；别的资源一律拒。
 
-    2026-10-20 PoC 实测到的真实队列名（RabbitMQ MQTT 插件）：
-      订阅队列  `mqtt-subscription-<client_id>qos0`（QoS1 是 `qos1`）
-      会话队列  `session-<client_id>` / 临时会话随机名
-    ⚠️ **exchange 写必须保持拒**：插件在 topic 判定拒绝后会回落到 exchange 级检查
-    （日志 `MQTT resource access refused: write access to exchange 'amq.topic'`）。
-    若在这里放行 amq.topic，跨 topic 发布就会经这条回落路径漏过去——topic ACL 直接失效。
+    2026-10-20 PoC 实测到的真实行为（别再按文档想当然）：
+      * 插件**先查 exchange 级权限**（`resource=exchange name=amq.topic permission=read|write`，
+        请求里**没有 routing_key**），这一关过了**才会**去查 `topic_path` 做 routing key 级判定。
+        把 amq.topic 在这里拒掉 = topic ACL 永远不会被调用（当时 `mqtt.topic.*` 日志计数为 0）。
+        所以这里是**粗闸门**，细粒度交给 `topic_allowed`。
+      * 真实队列名：订阅队列 `mqtt-subscription-<client_id>qos0`（QoS1 是 `qos1`）、
+        会话队列 `session-<client_id>` / 临时会话随机名。`client_id` 是 MQTT 的 client id，
+        **不等于用户名**（我们的 PoC 里 client id 是 `poc-<vin>-<hex>`）。
+      * 别的 exchange、别人的队列、服务端队列（`kuma.cmd.down`）一律拒。
     """
-    if not username or resource != "queue":
+    if not username:
+        return False
+    if resource == "exchange":
+        # 粗闸门：只放行 MQTT 用的 amq.topic；能不能发/订哪个 topic 由 topic_path 决定
+        return name == "amq.topic" and permission in ("read", "write")
+    if resource != "queue":
         return False
     if name.startswith("kuma."):          # 服务端队列是 gateway（internal 用户）的事
         return False
