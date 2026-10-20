@@ -77,7 +77,9 @@ async def seed(*, print_only: bool) -> None:
         if not vehicles:
             dealer = (await session.execute(select(Org).where(Org.code == "D-TH-001"))).scalar_one()
             for i, (code, *_rest) in enumerate(DEMO_TYPES):
-                vin = f"DEMO{i:014d}"
+                # core.vehicle.vin 是 character(17)：前缀 4 + 13 = 17，多一位就
+                # `value too long for type character(17)`（2026-10-20 实测，这脚本此前从没跑通过）
+                vin = f"DEMO{i:013d}"
                 v = Vehicle(vin=vin, type_code=code, region_id="TH", owner_type="org",
                             owner_org_id=dealer.id, cur_dealer_org_id=dealer.id,
                             plate=f"กข{i:04d}", status="in_service", usage_type="retail")
