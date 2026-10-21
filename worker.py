@@ -68,6 +68,9 @@ async def healthz() -> dict:
     - `events_unrouted.messages > 0` → outbox 发出去的事件没人接（T7 未定频道），
       现在不会丢（落在兜底队列），但**必须看得见**；`consumers=0` 即"没有消费方"。
       这是已知状态，故不影响 `status`。
+    - ⚠️ 读 `events_unrouted` 前先看 `events_alternate_exchange`：为 `false` 时 broker 上
+      那个遗留的 `kuma.events` 不带兜底，**队列恒为 0 不代表没有事件在丢**（2026-10-21 实测
+      过这个误读陷阱）。删掉旧交换机重启即恢复兜底。
     """
     pg = await healthcheck()
     redis = await redis_health()
@@ -80,6 +83,7 @@ async def healthz() -> dict:
             "pg": pg, "redis": redis, "mq": mq,
             "stale_jobs": sched["stale_jobs"],
             "jobs_total": len(JOBS),
+            "events_alternate_exchange": bus.events_ae,
             "events_unrouted": unrouted}
 
 

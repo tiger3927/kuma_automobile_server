@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import Any
 
 import aio_pika
@@ -25,7 +26,6 @@ from aio_pika.abc import (
     AbstractIncomingMessage,
     AbstractQueue,
 )
-from aio_pika.exceptions import ChannelPreconditionFailed
 
 from .config import get_settings
 from .logging import get_logger
@@ -44,6 +44,9 @@ class Bus:
         self._conn: AbstractConnection | None = None
         self._ch: AbstractChannel | None = None
         self._events: AbstractExchange | None = None
+        # 兜底是否真的生效（老 broker 上遗留的 kuma.events 不带 AE → False）。
+        # 探针必须把它报出来，否则 `unrouted=0` 会被误读成"没有事件丢失"。
+        self.events_ae = False
 
     async def connect(self) -> None:
         if self._conn is not None:
@@ -66,19 +69,25 @@ class Bus:
         )
         await unrouted.bind(ae, routing_key="")
 
-        try:
+        # ⚠️ exchange 的 arguments **建好后不能改**，而声明冲突（406 PRECONDITION_FAILED）
+        # 会**关掉整条 channel**——2026-10-21 实测：先带 AE 声明、接住异常再 passive 重声明，
+        # 第二步必炸（channel 已死）。所以**必须先探测再决定怎么建**，且探测用**独立 channel**
+        # （passive 查不存在的对象同样会关 channel，别污染主 channel）。
+        exists = await self._exchange_exists(X_EVENTS)
+        if exists:
+            self._events = await self._ch.declare_exchange(
+                X_EVENTS, ExchangeType.TOPIC, passive=True)
+            self.events_ae = False
+            log.warning("bus.events_exchange_legacy",
+                        hint="既有 kuma.events 不带 alternate-exchange，无路由事件仍会静默丢弃；"
+                             f"删掉旧交换机（当前它没有任何绑定与消息）让本进程重建，"
+                             f"即可拿到 {Q_EVENTS_UNROUTED} 兜底")
+        else:
             self._events = await self._ch.declare_exchange(
                 X_EVENTS, ExchangeType.TOPIC, durable=True, auto_delete=False,
                 arguments={"alternate-exchange": X_EVENTS_AE},
             )
-        except ChannelPreconditionFailed:
-            # broker 上已有不带 AE 的同名交换机（早期版本建的）。arguments 不能改，
-            # 只能删掉旧的让这里重建；降级声明保证进程不因运维滞后而崩（同 §consume 的教训）。
-            log.warning("bus.events_exchange_legacy",
-                        hint="既有 kuma.events 不带 alternate-exchange，无路由事件仍会静默丢弃；"
-                             f"删掉旧交换机让本进程重建即可拿到 {Q_EVENTS_UNROUTED} 兜底")
-            self._events = await self._ch.declare_exchange(
-                X_EVENTS, ExchangeType.TOPIC, passive=True)
+            self.events_ae = True
         dlx = await self._ch.declare_exchange("kuma.cmd.dlx.x", ExchangeType.FANOUT, durable=True)
         dlq = await self._ch.declare_queue(Q_CMD_DLX, durable=True,
                                            arguments={"x-message-ttl": 86_400_000})
@@ -92,6 +101,20 @@ class Bus:
             },
         )
         log.info("bus.connected")
+
+    async def _exchange_exists(self, name: str) -> bool:
+        """探测用**独立 channel**：passive 查不存在的对象会让 broker 关掉所在 channel，
+        拿主 channel 去试就会把后面所有声明一起带崩。"""
+        assert self._conn is not None, "connect() 未调用"
+        probe = await self._conn.channel()
+        try:
+            await probe.declare_exchange(name, ExchangeType.TOPIC, passive=True)
+            return True
+        except Exception:
+            return False
+        finally:
+            with suppress(Exception):
+                await probe.close()
 
     def is_connected(self) -> bool:
         conn = self._conn
