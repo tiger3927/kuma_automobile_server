@@ -247,7 +247,8 @@ class MediaService:
             select(func.coalesce(func.sum(Media.size_bytes), 0), func.count())
             .where(Media.status == "active")
         )).one()
-        return {"active_rows": int(n), "active_bytes": int(total)}
+        # size_bytes 可空，SUM 在零行时返回 NULL（SQL 里已 coalesce，这里再兜一层给类型系统）
+        return {"active_rows": int(n or 0), "active_bytes": int(total or 0)}
 
 
 media_service = MediaService()

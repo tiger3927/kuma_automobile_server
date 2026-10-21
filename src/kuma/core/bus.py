@@ -18,7 +18,6 @@ from typing import Any
 
 import aio_pika
 from aio_pika import DeliveryMode, ExchangeType, Message
-from aio_pika.exceptions import ChannelPreconditionFailed
 from aio_pika.abc import (
     AbstractChannel,
     AbstractConnection,
@@ -26,6 +25,7 @@ from aio_pika.abc import (
     AbstractIncomingMessage,
     AbstractQueue,
 )
+from aio_pika.exceptions import ChannelPreconditionFailed
 
 from .config import get_settings
 from .logging import get_logger
@@ -108,7 +108,15 @@ class Bus:
         except Exception as exc:
             log.warning("bus.queue_depth_failed", queue=queue, err=str(exc))
             return {"messages": -1, "consumers": -1}
-        return {"messages": int(q.message_count or 0), "consumers": int(q.consumer_count or 0)}
+        # `AbstractQueue` 接口没声明这两个属性（mypy 报 attr-defined），但 aio_pika 的具体
+        # Queue 类会从 broker 的 queue.declare-ok 里带回它们。用 getattr 同时兜住类型与版本差异，
+        # 取不到就报 -1（**宁可说"不知道"也不要报 0**，否则探针会假装黑洞是空的）。
+        messages = getattr(q, "message_count", None)
+        consumers = getattr(q, "consumer_count", None)
+        if messages is None or consumers is None:
+            log.warning("bus.queue_depth_unsupported", queue=queue, queue_type=type(q).__name__)
+            return {"messages": -1, "consumers": -1}
+        return {"messages": int(messages), "consumers": int(consumers)}
 
     async def close(self) -> None:
         if self._conn is not None:
