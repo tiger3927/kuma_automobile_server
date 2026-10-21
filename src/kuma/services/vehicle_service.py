@@ -16,7 +16,7 @@ from ..core.audit import write_audit
 from ..core.exceptions import Conflict, InvalidState, NotFound, ValidationFailed
 from ..core.pagination import PageParams
 from ..core.scope import Principal
-from ..core.security import hash_password
+from ..core.security import ahash_password
 from ..models.core import (
     Device,
     OwnershipTransfer,
@@ -158,7 +158,7 @@ class VehicleService:
         existing = await session.get(VehicleCredential, vin)
         version = (existing.version + 1) if existing else 1
         cred = VehicleCredential(
-            vin=vin, mqtt_username=vin, password_hash=hash_password(raw),
+            vin=vin, mqtt_username=vin, password_hash=await ahash_password(raw),
             version=version, status="active", issued_at=datetime.now(UTC), revoked_at=None,
         )
         session.add(cred)  # 主键冲突 → upsert

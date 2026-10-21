@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import anyio
 import jwt
+from anyio.to_thread import run_sync
 from pwdlib import PasswordHash
 from pwdlib.hashers.argon2 import Argon2Hasher
 
@@ -33,6 +36,27 @@ def verify_password(raw: str, hashed: str | None) -> bool:
         return _hasher.verify(raw, hashed)   # 实测签名：verify(password, hash)
     except Exception:
         return False
+
+
+# ⚠️ 上面两个函数是**同步 CPU 密集**调用：实测单次 argon2id(m=64MB,t=3,p=4) ≈ 195ms、峰值 RSS +64MB。
+# 在 `async def` 里直接调它们会把整个事件循环串行堵住——2026-10-21 冒烟实测：100 台设备同时连，
+# api 15s 只完成 40 次认证（≈5 次/s），其余全部 `rabbit_auth_backend_http ... timeout`，
+# 客户端拿到 134/135，MQ 侧一片超时。**异步路径必须用下面两个包装。**
+# 并发上限默认 2（= 调试机 nproc）：开大了在 2 核上不会更快，但 64MB×N 会直接把 4GB 机器 OOM。
+_HASH_CONCURRENCY = max(1, int(os.getenv("KUMA_HASH_CONCURRENCY", "2")))
+_hash_sem = anyio.Semaphore(_HASH_CONCURRENCY)
+
+
+async def ahash_password(raw: str) -> str:
+    async with _hash_sem:
+        return await run_sync(hash_password, raw)
+
+
+async def averify_password(raw: str, hashed: str | None) -> bool:
+    if not hashed:
+        return False
+    async with _hash_sem:
+        return await run_sync(verify_password, raw, hashed)
 
 
 def hash_token(raw: str) -> str:

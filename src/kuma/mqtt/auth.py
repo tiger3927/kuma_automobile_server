@@ -28,11 +28,12 @@ from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
+from starlette.requests import ClientDisconnect
 
 from ..core.config import get_settings
 from ..core.db import get_session_factory
 from ..core.logging import get_logger
-from ..core.security import verify_password
+from ..core.security import averify_password
 from ..models.core import VehicleCredential
 
 log = get_logger("mqtt.auth")
@@ -56,7 +57,12 @@ async def _params(request: Request) -> dict[str, str]:
     """GET 走 query string、POST 走 urlencoded body，两种都收（插件按 `http_method` 决定）。"""
     params = {k: v for k, v in request.query_params.multi_items()}
     if request.method == "POST":
-        body = await request.body()
+        try:
+            body = await request.body()
+        except ClientDisconnect:
+            # 认证排队太久、客户端先断开的情况（2026-10-21 冒烟实测）：拿不到 body 就安静返回，
+            # 别让它冒成 500 污染日志——连接已经死了，MQ 那边会自己重试。
+            return params
         if body:
             for k, vals in parse_qs(body.decode("utf-8", "replace")).items():
                 params[k] = vals[-1]
@@ -120,7 +126,7 @@ async def verify_credential(username: str, password: str) -> bool:
         cred = await session.get(VehicleCredential, username)
     if cred is None or cred.status != "active":
         return False
-    return verify_password(password, cred.password_hash)
+    return await averify_password(password, cred.password_hash)
 
 
 @router.post("/user")

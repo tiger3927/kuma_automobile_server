@@ -11,11 +11,11 @@ from ..core.audit import write_audit
 from ..core.exceptions import Conflict, Forbidden, Unauthorized, ValidationFailed
 from ..core.scope import IdentityType, Principal
 from ..core.security import (
+    ahash_password,
+    averify_password,
     create_access_token,
     create_refresh_token,
-    hash_password,
     hash_token,
-    verify_password,
 )
 from ..models.core import Account, UserProfile
 from ..repositories.account_repo import AccountRepo
@@ -39,7 +39,7 @@ class AuthService:
             raise Conflict("phone_taken")
 
         account = Account(username=username, phone=phone, email=email,
-                          password_hash=hash_password(password), region_id=region_id,
+                          password_hash=await ahash_password(password), region_id=region_id,
                           status="active", kyc_level=0)
         session.add(account)
         await session.flush()
@@ -54,7 +54,7 @@ class AuthService:
     async def login(self, session: AsyncSession, *, username: str, password: str,
                     identity_type: str | None = None, ip: str | None = None) -> dict:
         account = await self.repo.by_username(session, username)
-        if account is None or not verify_password(password, account.password_hash):
+        if account is None or not await averify_password(password, account.password_hash):
             raise Unauthorized("bad_credentials")
         if account.status != "active":
             raise Forbidden("account_inactive")
