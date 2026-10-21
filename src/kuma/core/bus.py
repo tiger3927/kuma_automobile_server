@@ -73,21 +73,18 @@ class Bus:
         # 会**关掉整条 channel**——2026-10-21 实测：先带 AE 声明、接住异常再 passive 重声明，
         # 第二步必炸（channel 已死）。所以**必须先探测再决定怎么建**，且探测用**独立 channel**
         # （passive 查不存在的对象同样会关 channel，别污染主 channel）。
-        exists = await self._exchange_exists(X_EVENTS)
-        if exists:
-            self._events = await self._ch.declare_exchange(
-                X_EVENTS, ExchangeType.TOPIC, passive=True)
-            self.events_ae = False
+        # 探测本身**就是创建**：非 passive 声明在"不存在"时建出来、在"已存在且参数一致"时成功、
+        # 只有"已存在但参数不同"才 406。所以一次探测能分出三种情况，比 passive 只看存在更准
+        # （passive 读不到 arguments，会把已带 AE 的交换机误报成兜底没生效）。
+        state = await self._probe_events_exchange()
+        self.events_ae = state != "legacy"
+        if state == "legacy":
             log.warning("bus.events_exchange_legacy",
                         hint="既有 kuma.events 不带 alternate-exchange，无路由事件仍会静默丢弃；"
-                             f"删掉旧交换机（当前它没有任何绑定与消息）让本进程重建，"
+                             f"删掉旧交换机（它通常没有绑定与消息）让本进程重建，"
                              f"即可拿到 {Q_EVENTS_UNROUTED} 兜底")
-        else:
-            self._events = await self._ch.declare_exchange(
-                X_EVENTS, ExchangeType.TOPIC, durable=True, auto_delete=False,
-                arguments={"alternate-exchange": X_EVENTS_AE},
-            )
-            self.events_ae = True
+        # 到这里交换机一定存在（探测阶段已建好或确认在），主 channel 只取句柄。
+        self._events = await self._ch.declare_exchange(X_EVENTS, ExchangeType.TOPIC, passive=True)
         dlx = await self._ch.declare_exchange("kuma.cmd.dlx.x", ExchangeType.FANOUT, durable=True)
         dlq = await self._ch.declare_queue(Q_CMD_DLX, durable=True,
                                            arguments={"x-message-ttl": 86_400_000})
@@ -102,16 +99,25 @@ class Bus:
         )
         log.info("bus.connected")
 
-    async def _exchange_exists(self, name: str) -> bool:
-        """探测用**独立 channel**：passive 查不存在的对象会让 broker 关掉所在 channel，
-        拿主 channel 去试就会把后面所有声明一起带崩。"""
+    async def _probe_events_exchange(self) -> str:
+        """返回 `with_ae`（已带兜底，或本次建出来）/ `legacy`（存在但不带兜底）。
+
+        必须用**独立 channel**：406 与 404 都会关掉所在 channel（2026-10-21 实测），
+        拿主 channel 试会把后面所有声明一起带崩。
+        """
         assert self._conn is not None, "connect() 未调用"
         probe = await self._conn.channel()
         try:
-            await probe.declare_exchange(name, ExchangeType.TOPIC, passive=True)
-            return True
-        except Exception:
-            return False
+            await probe.declare_exchange(
+                X_EVENTS, ExchangeType.TOPIC, durable=True, auto_delete=False,
+                arguments={"alternate-exchange": X_EVENTS_AE},
+            )
+            return "with_ae"
+        except Exception as exc:
+            if "PRECONDITION_FAILED" in str(exc):
+                return "legacy"
+            log.warning("bus.events_probe_failed", err=str(exc))
+            return "legacy"          # 探测不出来就按"没有兜底"报，宁可保守
         finally:
             with suppress(Exception):
                 await probe.close()
