@@ -25,6 +25,8 @@ settings.role = "gateway"
 
 app = FastAPI(title="kuma gateway")
 
+_GW: MqttGateway | None = None      # main() 里赋值；/stats 要读它的入站计数器
+
 
 @app.get("/healthz")
 async def healthz() -> dict:
@@ -34,6 +36,24 @@ async def healthz() -> dict:
     ok = all(x["status"] == "ok" for x in (pg, redis, mq))
     return {"status": "ok" if ok else "degraded", "role": settings.role,
             "pg": pg, "redis": redis, "mq": mq}
+
+
+@app.get("/stats")
+async def stats() -> dict:
+    """入站计数器（只绑 127.0.0.1 的健康端口）。
+
+    M3 验收的"零丢包"必须看这里：`inserted` 会**合法地**小于客户端发送数
+    （deadband 过滤静止近点、dedup 挡重复投递、补报窗口外的点丢弃），
+    真正的丢是 `queue_dropped`（背压）与 `received` 对不上客户端确认数。
+    """
+    if _GW is None:
+        return {"status": "starting"}
+    s = _GW.inbound.stats
+    return {"status": "ok", "mqtt_connected": _GW.is_connected(),
+            "queue_depth": _GW.inbound.queue_depth(),
+            "received": s.received, "inserted": s.inserted,
+            "dup_dropped": s.dup_dropped, "stale_dropped": s.stale_dropped,
+            "queue_dropped": s.queue_dropped, "decoded_error": s.decoded_error}
 
 
 async def main() -> None:
@@ -46,7 +66,9 @@ async def main() -> None:
     ))
     health_task = asyncio.create_task(server.serve(), name="gateway-health")
 
+    global _GW
     gateway = MqttGateway(settings)   # 下行队列在 MQTT 就绪后由 run() 内部绑定
+    _GW = gateway
     try:
         await gateway.run()
     finally:

@@ -97,6 +97,10 @@ class InboundPipeline:
         except Exception as exc:
             log.error("inbound.flush_failed", count=len(batch), err=str(exc))
 
+    def queue_depth(self) -> int:
+        """当前待批量落库的点数（/stats 用，判断背压）。"""
+        return self._queue.qsize()
+
     async def drain(self) -> None:
         """测试/关闭用：把队列清空。"""
         while not self._queue.empty():

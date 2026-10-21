@@ -59,6 +59,10 @@ class MqttGateway:
             async for message in client.messages:
                 await self._route(str(message.topic), message.payload)
 
+    def is_connected(self) -> bool:
+        """MQTT 订阅连接是否在（/stats 用；AMQP 下行连接由 core.bus 自己报）。"""
+        return self._mqtt is not None
+
     async def shutdown(self) -> None:
         for t in self._tasks:
             t.cancel()
