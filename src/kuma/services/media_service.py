@@ -8,6 +8,7 @@
   软删后槽位自动释放。
 - **不解析图片宽高**：依赖里没有 pillow（§6 依赖清单没列，也不为这个加），
   `width_px/height_px` 由客户端提交，缺省留空——**别误以为服务端校验过图片尺寸**。
+  但**字节头会校验**（`_MAGIC`）：声明 `image/jpeg` 就必须真是 JPEG，尺寸不管。
 - 权限按 `owner_type` 分流（下表），公开类（车型/商品）任何登录身份可读。
 """
 
@@ -56,7 +57,22 @@ PUBLIC_OWNERS = frozenset({"vehicle_type", "product", "sku"})
 ALLOWED_MIME: dict[str, str] = {
     "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf",
 }
+# 声明的 mime 必须与**字节头**一致。只信 `UploadFile.content_type` 等于把闸门交给客户端：
+# 任何人把脚本改名 .jpg 并声明 image/jpeg 就能存进来，再被 GET /media/{id}/file 按
+# 声明的 mime 原样吐给别的用户（存储型 XSS / 恶意文件入口）。2026-10-21 端到端时发现的。
+_MAGIC: dict[str, tuple[bytes, ...]] = {
+    "image/jpeg": (b"\xff\xd8\xff",),
+    "image/png": (b"\x89PNG\r\n\x1a\n",),
+    "image/webp": (b"RIFF",),
+    "application/pdf": (b"%PDF-",),
+}
 _ROLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def _magic_ok(mime: str, data: bytes) -> bool:
+    if mime == "image/webp":       # RIFF 是容器，必须再看 8..12 的 "WEBP"
+        return data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    return any(data.startswith(p) for p in _MAGIC[mime])
 
 
 class MediaService:
@@ -107,6 +123,8 @@ class MediaService:
             raise ValidationFailed("空文件")
         if len(data) > limit:
             raise ValidationFailed(f"超过上限 {limit} 字节")
+        if not _magic_ok(mime, data):
+            raise ValidationFailed(f"文件内容与声明的 {mime} 不符")
 
         row = Media(
             owner_type=owner_type, owner_id=owner_id, role=role,
