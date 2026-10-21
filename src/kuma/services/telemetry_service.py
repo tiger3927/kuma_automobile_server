@@ -1,6 +1,9 @@
-"""遥测入库管道：补报窗口 → deadband → COPY 落库 → Redis 状态 → 实时广播。
+"""遥测入库管道：补报窗口 → deadband → COPY 落库 → Redis 状态。
 
 顺序按 Task-Server.md §12-9：**deadband 在解码后、落库前**，被过滤的点仍更新 Redis 最新状态。
+
+**实时广播不在这里**——它在 `mqtt/inbound.py` 出队时就发了（§12-9：最新状态不依赖落库）。
+放在这里会让 WS 延迟被批处理窗口卡住（§12-10）。
 """
 
 from __future__ import annotations
@@ -9,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 
 from ..core.config import get_settings
 from ..core.logging import get_logger
-from ..realtime.broadcaster import publish_vin
 from ..repositories.state_repo import StateRepo
 from ..repositories.telemetry_repo import FlushStats, TelemetryPoint, TelemetryRepo
 
@@ -39,8 +41,6 @@ class TelemetryService:
                 "ts": p.ts, "lat": p.lat, "lon": p.lon, "speed_kmh": p.speed_kmh,
                 "soc": p.soc, "odo_km": p.odo_km, "quality": p.quality,
             })
-        if kept:
-            await self._broadcast(kept)
         if stale:
             log.warn("telemetry.stale_dropped", count=stale)
         return stats
@@ -61,16 +61,6 @@ class TelemetryService:
             return False
         dist_m = ((p.lat - prev_lat) ** 2 + (p.lon - prev_lon) ** 2) ** 0.5 * 111_000
         return dist_m < s.deadband_min_dist_m
-
-    async def _broadcast(self, points: list[TelemetryPoint]) -> None:
-        latest: dict[str, TelemetryPoint] = {}
-        for p in points:
-            latest[p.vin] = p
-        for vin, p in latest.items():
-            await publish_vin(vin, "telemetry", {
-                "ts": p.ts, "lat": p.lat, "lon": p.lon, "speed_kmh": p.speed_kmh,
-                "soc": p.soc, "odo_km": p.odo_km,
-            })
 
     async def track(self, vin: str, start: datetime, end: datetime, *, limit: int = 5000) -> list[dict]:
         return await self.repo.track(vin, start, end, limit=limit)
