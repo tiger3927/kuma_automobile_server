@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     # 轨迹查询硬约束（512MB PG 下防 OOM，Task-DataBase.md §8）
     trace_max_days: int = Field(7, alias="KUMA_TRACE_MAX_DAYS")
 
+    # 媒体（core.media + 本地磁盘；v1 无对象存储）
+    # 默认值是**服务器**路径；本机 dev 必须用 KUMA_MEDIA_ROOT 覆盖到可写目录，
+    # 否则上传会因 /data 不存在而失败（fail fast，不静默写到当前目录）。
+    media_root: str = Field("/data/kuma_media", alias="KUMA_MEDIA_ROOT")
+    media_max_bytes: int = Field(5 * 1024 * 1024, alias="KUMA_MEDIA_MAX_BYTES")
+
     @property
     def is_prod(self) -> bool:
         return self.kuma_env == "prod"

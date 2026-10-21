@@ -3,6 +3,10 @@
 拓扑（Task-Server.md §4.3，启动时幂等声明）：
 - `kuma.cmd.down`  持久队列，TTL 由指令超时决定，死信 → `kuma.cmd.dlx`
 - `kuma.events`    topic 交换机，outbox 事件按 `aggregate_type.event_type` 路由
+- `kuma.events.ae` → `kuma.events.unrouted`  **兜底**：topic 交换机没有任何绑定时消息会被
+  broker 静默丢弃，而业务队列（T7）尚未定，所以给 `kuma.events` 挂 alternate exchange，
+  无路由的事件落到 `kuma.events.unrouted` 队列——**不丢，且可被探针计数**（`/healthz` 报深度）。
+  等 T7 定了消费频道，补上绑定即可，期间积压的事件还能回放。
 Redis 不做可靠队列（§4.1），只缓存/状态/pubsub。
 """
 
@@ -14,6 +18,7 @@ from typing import Any
 
 import aio_pika
 from aio_pika import DeliveryMode, ExchangeType, Message
+from aio_pika.exceptions import ChannelPreconditionFailed
 from aio_pika.abc import (
     AbstractChannel,
     AbstractConnection,
@@ -30,6 +35,8 @@ log = get_logger("bus")
 Q_CMD_DOWN = "kuma.cmd.down"
 Q_CMD_DLX = "kuma.cmd.dlx"
 X_EVENTS = "kuma.events"
+X_EVENTS_AE = "kuma.events.ae"          # alternate exchange：接住无路由事件
+Q_EVENTS_UNROUTED = "kuma.events.unrouted"
 
 
 class Bus:
@@ -49,9 +56,29 @@ class Bus:
         self._ch = await self._conn.channel()
         await self._ch.set_qos(prefetch_count=200)
 
-        self._events = await self._ch.declare_exchange(
-            X_EVENTS, ExchangeType.TOPIC, durable=True, auto_delete=False
+        # 兜底链先建：AE → unrouted 队列。上限是为了 4G 机器保命（§3）：
+        # 事件本身不进 PG，积压到上限就拒收，宁可丢兜底也不能压垮 broker。
+        ae = await self._ch.declare_exchange(X_EVENTS_AE, ExchangeType.FANOUT, durable=True)
+        unrouted = await self._ch.declare_queue(
+            Q_EVENTS_UNROUTED, durable=True,
+            arguments={"x-message-ttl": 7 * 86_400_000,
+                       "x-max-length": 50_000, "x-overflow": "reject-publish"},
         )
+        await unrouted.bind(ae, routing_key="")
+
+        try:
+            self._events = await self._ch.declare_exchange(
+                X_EVENTS, ExchangeType.TOPIC, durable=True, auto_delete=False,
+                arguments={"alternate-exchange": X_EVENTS_AE},
+            )
+        except ChannelPreconditionFailed:
+            # broker 上已有不带 AE 的同名交换机（早期版本建的）。arguments 不能改，
+            # 只能删掉旧的让这里重建；降级声明保证进程不因运维滞后而崩（同 §consume 的教训）。
+            log.warning("bus.events_exchange_legacy",
+                        hint="既有 kuma.events 不带 alternate-exchange，无路由事件仍会静默丢弃；"
+                             f"删掉旧交换机让本进程重建即可拿到 {Q_EVENTS_UNROUTED} 兜底")
+            self._events = await self._ch.declare_exchange(
+                X_EVENTS, ExchangeType.TOPIC, passive=True)
         dlx = await self._ch.declare_exchange("kuma.cmd.dlx.x", ExchangeType.FANOUT, durable=True)
         dlq = await self._ch.declare_queue(Q_CMD_DLX, durable=True,
                                            arguments={"x-message-ttl": 86_400_000})
@@ -69,6 +96,19 @@ class Bus:
     def is_connected(self) -> bool:
         conn = self._conn
         return conn is not None and not conn.is_closed
+
+    async def queue_depth(self, queue: str) -> dict[str, int]:
+        """只读查队列深度与消费者数（`passive=True` 不建、不改参数）。
+
+        探针用它看 `kuma.events.unrouted`：**深度 > 0 就说明事件发出去没人接**，
+        `consumers=0` 则说明频道还没接上（T7）。查不到队列返回 -1，不抛。
+        """
+        try:
+            q = await self.channel.declare_queue(queue, passive=True)
+        except Exception as exc:
+            log.warning("bus.queue_depth_failed", queue=queue, err=str(exc))
+            return {"messages": -1, "consumers": -1}
+        return {"messages": int(q.message_count or 0), "consumers": int(q.consumer_count or 0)}
 
     async def close(self) -> None:
         if self._conn is not None:

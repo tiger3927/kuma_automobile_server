@@ -2,13 +2,28 @@
 
 from fastapi import APIRouter
 
-from . import alarms, auth, commands, fleet, gov, orgs, public, trips, vehicles, ws
+from . import (
+    alarms,
+    auth,
+    commands,
+    fleet,
+    gdpr,
+    gov,
+    media,
+    orgs,
+    public,
+    trips,
+    vehicles,
+    ws,
+)
 
 api_router = APIRouter()
 api_router.include_router(public.router)   # 无鉴权，必须落在 /api/v1/public/ 前缀下（限流规则按前缀匹配）
 api_router.include_router(auth.router)
 api_router.include_router(orgs.router)
 api_router.include_router(vehicles.router)
+api_router.include_router(media.router)
+api_router.include_router(gdpr.router)     # /me/data 与 /me/erasure
 api_router.include_router(fleet.router)
 api_router.include_router(trips.router)
 api_router.include_router(alarms.router)
