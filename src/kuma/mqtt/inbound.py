@@ -122,7 +122,7 @@ class InboundPipeline:
                 "ts": p.ts, "lat": p.lat, "lon": p.lon, "speed_kmh": p.speed_kmh,
                 "soc": p.soc, "odo_km": p.odo_km,
             })
-        except Exception as exc:                        # noqa: BLE001 - 推送失败不能带停落库
+        except Exception as exc:            # 推送失败不能带停落库（本项目未启用 BLE001，别加 noqa）
             log.warn("inbound.publish_failed", vin=p.vin, err=str(exc))
 
     async def _flush(self, batch: list[TelemetryPoint]) -> None:
