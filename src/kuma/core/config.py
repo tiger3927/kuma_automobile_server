@@ -45,6 +45,10 @@ class Settings(BaseSettings):
 
     # RabbitMQ
     amqp_url: str = Field("amqp://guest@127.0.0.1:5672/%2Fkuma", alias="KUMA_AMQP_URL")
+    # 管理口（探针查队列深度用）。留空则从 amqp_url 的 host 推 `http://<host>:15672`。
+    # 为什么需要它：AMQP `queue.declare-ok` 里的 message_count/consumer_count 在 RabbitMQ
+    # 已废弃且不保证准确——2026-10-21 实测 management 报 messages=1，passive declare 报 0。
+    mq_mgmt_url: str = Field("", alias="KUMA_MQ_MGMT_URL")
     mqtt_url: str = Field("mqtt://127.0.0.1:1883", alias="KUMA_MQTT_URL")
     mqtt_user: str = Field("kuma_mq", alias="KUMA_MQTT_USER")
     mqtt_password: str = Field("", alias="KUMA_MQTT_PASSWORD")

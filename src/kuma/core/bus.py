@@ -16,8 +16,10 @@ import json
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Any
+from urllib.parse import quote, unquote, urlparse
 
 import aio_pika
+import httpx
 from aio_pika import DeliveryMode, ExchangeType, Message
 from aio_pika.abc import (
     AbstractChannel,
@@ -127,27 +129,40 @@ class Bus:
         return conn is not None and not conn.is_closed
 
     async def queue_depth(self, queue: str) -> dict[str, int]:
-        """只读查队列深度与消费者数（`passive=True` 不建、不改参数）。
+        """队列深度与消费者数——**必须走 management HTTP API**。
 
-        探针用它看 `kuma.events.unrouted`：**深度 > 0 就说明事件发出去没人接**，
-        `consumers=0` 则说明频道还没接上（T7）。查不到队列返回 -1，不抛。
+        探针用它看 `kuma.events.unrouted`：深度 > 0 就说明事件发出去没人接（T7 未定频道），
+        `consumers=0` 即"没有消费方"。查不到返回 -1，不抛。
+
+        为什么不用 AMQP：`queue.declare-ok` 里的 message_count/consumer_count 在 RabbitMQ
+        已废弃且不保证准确——2026-10-21 实测 management 报 `messages=1`，同一时刻
+        passive declare 报 0。**探针报 0 比不报更糟**（会让人以为黑洞是空的）。
         """
+        base, auth, vhost = self._mgmt()
+        url = f"{base}/api/queues/{quote(vhost, safe='')}/{quote(queue, safe='')}"
         try:
-            q = await self.channel.declare_queue(queue, passive=True)
+            async with httpx.AsyncClient(timeout=3.0) as cli:
+                r = await cli.get(url, auth=auth)
         except Exception as exc:
             log.warning("bus.queue_depth_failed", queue=queue, err=str(exc))
             return {"messages": -1, "consumers": -1}
-        # 深度在 **`q.declaration_result`**（AMQP `queue.declare-ok` 的 DeclareOk）里：
-        # aio_pika 10 的 RobustQueue/Queue 对象上**没有** message_count/consumer_count
-        # （2026-10-21 实测 `dir()` 只有 declaration_result，直接抄旧版写法会永远拿到 -1）。
-        # 取不到就报 -1 —— **宁可说"不知道"，也不能报 0**，否则探针会假装黑洞是空的。
-        dec = getattr(q, "declaration_result", None)
-        messages = getattr(dec, "message_count", None)
-        consumers = getattr(dec, "consumer_count", None)
-        if messages is None or consumers is None:
-            log.warning("bus.queue_depth_unsupported", queue=queue, queue_type=type(q).__name__)
+        if r.status_code == 404:
             return {"messages": -1, "consumers": -1}
-        return {"messages": int(messages), "consumers": int(consumers)}
+        if r.status_code != 200:
+            log.warning("bus.queue_depth_http", queue=queue, status=r.status_code)
+            return {"messages": -1, "consumers": -1}
+        d = r.json()
+        return {"messages": int(d.get("messages") or 0), "consumers": int(d.get("consumers") or 0)}
+
+    @staticmethod
+    def _mgmt() -> tuple[str, tuple[str, str], str]:
+        """管理口地址与凭据：默认复用 `amqp_url` 的 host（端口 15672），
+        可用 `KUMA_MQ_MGMT_URL` 覆盖。凭据只用于这次请求，不进日志。"""
+        s = get_settings()
+        u = urlparse(s.amqp_url)
+        base = (s.mq_mgmt_url or f"http://{u.hostname}:15672").rstrip("/")
+        vhost = unquote(u.path.lstrip("/")) or "/"
+        return base, (u.username or "", u.password or ""), vhost
 
     async def close(self) -> None:
         if self._conn is not None:
