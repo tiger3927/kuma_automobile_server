@@ -131,11 +131,13 @@ class Bus:
         except Exception as exc:
             log.warning("bus.queue_depth_failed", queue=queue, err=str(exc))
             return {"messages": -1, "consumers": -1}
-        # `AbstractQueue` 接口没声明这两个属性（mypy 报 attr-defined），但 aio_pika 的具体
-        # Queue 类会从 broker 的 queue.declare-ok 里带回它们。用 getattr 同时兜住类型与版本差异，
-        # 取不到就报 -1（**宁可说"不知道"也不要报 0**，否则探针会假装黑洞是空的）。
-        messages = getattr(q, "message_count", None)
-        consumers = getattr(q, "consumer_count", None)
+        # 深度在 **`q.declaration_result`**（AMQP `queue.declare-ok` 的 DeclareOk）里：
+        # aio_pika 10 的 RobustQueue/Queue 对象上**没有** message_count/consumer_count
+        # （2026-10-21 实测 `dir()` 只有 declaration_result，直接抄旧版写法会永远拿到 -1）。
+        # 取不到就报 -1 —— **宁可说"不知道"，也不能报 0**，否则探针会假装黑洞是空的。
+        dec = getattr(q, "declaration_result", None)
+        messages = getattr(dec, "message_count", None)
+        consumers = getattr(dec, "consumer_count", None)
         if messages is None or consumers is None:
             log.warning("bus.queue_depth_unsupported", queue=queue, queue_type=type(q).__name__)
             return {"messages": -1, "consumers": -1}
