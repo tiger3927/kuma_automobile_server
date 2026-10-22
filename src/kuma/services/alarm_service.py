@@ -113,7 +113,11 @@ class AlarmService:
         alarm = await session.get(Alarm, alarm_id)
         if alarm is None:
             raise NotFound("alarm_not_found")
-        vehicle = await session.get(Vehicle, alarm.vin)
+        # ⚠️ Vehicle 的主键是 `id`，`vin` 只是 unique 列——`session.get(Vehicle, vin)`
+        # 会把 17 字符的 VIN 当整数主键传给驱动，直接 500（2026-10-22 实测）。
+        vehicle = (await session.execute(
+            select(Vehicle).where(Vehicle.vin == alarm.vin)
+        )).scalar_one_or_none()
         if vehicle is None:
             raise NotFound("alarm_not_found")
         assert_vehicle_visible(principal, vehicle)
