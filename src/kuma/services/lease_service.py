@@ -233,9 +233,9 @@ class LeaseService:
             # 运营商给自己的车签：持有人 = 该 org
             return operator_org_id, "org", None, body.operator_org_id, None
 
-        if not principal.orgs:
-            raise ValidationFailed("个人签协议需要账号身份；运营商请用自己的 org 身份",
-                                   code="holder_unresolved")
+        # 落到这里就是"个人签"：持有人 = 当前账号（有没有 org 都不影响——
+        # 运营商员工也可能给自己名下的车签协议，只是持有人记人不记 org）。
+        # 原来的 `if not principal.orgs: raise` 把条件写反了，正好把个人用户挡在门外。
         return operator_org_id, "account", principal.account_id, None, None
 
     async def _require_operator_of(self, session: AsyncSession, principal: Principal,

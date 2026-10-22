@@ -167,7 +167,9 @@ class BatteryModelService:
             raise ValidationFailed("table 只能是 swap_price / deposit_rule", code="bad_table")
         if not principal.is_platform:
             raise Forbidden("rule_approval_requires_platform")
-        principal.require("battery_model" if table == "swap_price" else "deposit", "write")
+        # 审核动作，不是 write：申报方是运营商（`deposit: write`），平台只批不写
+        # （权限矩阵里 platform_staff 对 deposit 只有 read/review——用 write 会把平台自己挡在门外）
+        principal.require("deposit", "review")
         row = await self.repo.approve_rule(session, table=table, rule_id=rule_id,
                                            approve=body.approve, approver=principal.account_id)
         if row is None:

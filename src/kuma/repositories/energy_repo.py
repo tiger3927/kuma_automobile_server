@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 
@@ -67,8 +68,25 @@ DEPOSIT_COLS = """
 _UNSET = object()
 
 
+#: 本 repo 里出现过的 jsonb 列。**裸 `text()` 绑定不带列类型信息**，asyncpg 收到
+#: list/dict 会直接 `DataError: 'list' object has no attribute 'encode'`（实测），
+#: 写 `CAST(:x AS jsonb)` 也救不了——CAST 在服务端，编码在客户端就炸。
+#: 读侧不用管：SQLAlchemy 的 asyncpg 方言已把 jsonb 结果解码成 list/dict。
+JSONB_COLS = frozenset({"compatible_types", "cert_marks", "business_hours", "allowed_models",
+                        "pricing", "payload"})
+
+
+def _j(value: Any) -> Any:
+    """jsonb 入参序列化（None 原样传，交给列默认值）。"""
+    return None if value is None else json.dumps(value, ensure_ascii=False)
+
+
+def _jsonb(params: dict[str, Any]) -> dict[str, Any]:
+    return {k: (_j(v) if k in JSONB_COLS else v) for k, v in params.items()}
+
+
 def _params(**kw: Any) -> dict[str, Any]:
-    return {k: v for k, v in kw.items()}
+    return _jsonb(kw)
 
 
 class EnergyRepo:
@@ -90,6 +108,7 @@ class EnergyRepo:
         return [dict(r) for r in (await session.execute(text(sql), p)).mappings().all()]
 
     async def insert_model(self, session: AsyncSession, *, m: dict[str, Any]) -> dict[str, Any]:
+        m = _jsonb(m)                       # compatible_types / cert_marks 是 jsonb
         cols = ", ".join(m.keys())
         binds = ", ".join(f":{k}" for k in m)
         await session.execute(text(
@@ -165,7 +184,7 @@ class EnergyRepo:
                     :bay_count, :needs_handling_aid)
         """), {"code": code, "name": name, "org_id": org_id, "lng": lng, "lat": lat,
                "address": address, "region_id": region_id,
-               "business_hours": business_hours, "allowed_models": allowed_models,
+               "business_hours": _j(business_hours), "allowed_models": _j(allowed_models),
                "bay_count": bay_count, "needs_handling_aid": needs_handling_aid})
         await session.flush()
         row = await self.get_station(session, code=code)
@@ -188,7 +207,7 @@ class EnergyRepo:
             UPDATE energy.station
                SET allowed_models = CAST(:m AS jsonb), updated_at = now()
              WHERE id = :id
-        """), {"m": models, "id": station_id})
+        """), {"m": _j(models), "id": station_id})
         await session.flush()
         return await self.get_station(session, station_id=station_id)
 
@@ -201,8 +220,10 @@ class EnergyRepo:
             SELECT s.id AS station_id, s.code, s.name, s.org_id, s.address,
                    s.business_hours, s.status,
                    ST_AsText(s.geom) AS geom_wkt,
-                   round(ST_Distance(s.geom::geography,
-                         ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography) / 1000.0, 2
+                   -- 必须 ::numeric：ST_Distance(geography) 返回 double precision，
+                   -- PG 没有 round(double precision, int)（实测报 function round(...) does not exist）
+                   round((ST_Distance(s.geom::geography,
+                         ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography) / 1000.0)::numeric, 2
                    ) AS distance_km,
                    s.allowed_models,
                    COALESCE(jsonb_agg(jsonb_build_object(
@@ -329,20 +350,30 @@ class EnergyRepo:
                            ready_delta: int, charging_delta: int, faulty_delta: int) -> None:
         """原子增减库存（与电池行同事务）。
 
-        `CHECK (ready_count >= 0)` 是最后一道防线：如果某条路径少写了一次增减，
-        这里会抛 check_violation 而不是把库存悄悄改成负数。
+        **不能写成 `INSERT … VALUES(:rd,:cd,:fd) ON CONFLICT DO UPDATE`**（实测踩坑）：
+        PG 先按 INSERT 分支做 CHECK 再检测冲突，所以减库存（rd=-1）在行已存在时也会
+        先拿 -1 去过 `ready_count >= 0` → 直接 check_violation，ON CONFLICT 根本没机会生效。
+        正确写法：先 upsert 一行全 0（永不违反 CHECK），再 UPDATE 叠加增量。
+
+        `CHECK (ready_count >= 0)` 仍是最后一道防线：某条路径少写一次增减时，
+        UPDATE 会抛 check_violation，而不是把库存悄悄改成负数。
         """
+        p = {"station_id": station_id, "model_code": model_code,
+             "rd": ready_delta, "cd": charging_delta, "fd": faulty_delta}
         await session.execute(text("""
             INSERT INTO energy.station_stock
                    (station_id, model_code, ready_count, charging_count, faulty_count, updated_at)
-            VALUES (:station_id, :model_code, :rd, :cd, :fd, now())
-            ON CONFLICT (station_id, model_code) DO UPDATE
-               SET ready_count   = energy.station_stock.ready_count   + EXCLUDED.ready_count,
-                   charging_count = energy.station_stock.charging_count + EXCLUDED.charging_count,
-                   faulty_count  = energy.station_stock.faulty_count  + EXCLUDED.faulty_count,
-                   updated_at    = now()
-        """), {"station_id": station_id, "model_code": model_code,
-               "rd": ready_delta, "cd": charging_delta, "fd": faulty_delta})
+            VALUES (:station_id, :model_code, 0, 0, 0, now())
+            ON CONFLICT (station_id, model_code) DO NOTHING
+        """), p)
+        await session.execute(text("""
+            UPDATE energy.station_stock
+               SET ready_count    = ready_count    + :rd,
+                   charging_count = charging_count + :cd,
+                   faulty_count   = faulty_count   + :fd,
+                   updated_at     = now()
+             WHERE station_id = :station_id AND model_code = :model_code
+        """), p)
         await session.flush()
 
     async def stock_recompute(self, session: AsyncSession, station_id: int) -> list[dict[str, Any]]:
@@ -643,6 +674,7 @@ class EnergyRepo:
         return dict(row) if row else None
 
     async def insert_swap(self, session: AsyncSession, *, swap: dict[str, Any]) -> dict[str, Any]:
+        swap = _jsonb(swap)                 # pricing 是 jsonb 计价快照
         cols = ", ".join(swap.keys())
         binds = ", ".join(f":{k}" for k in swap)
         row = (await session.execute(text(
@@ -687,7 +719,7 @@ class EnergyRepo:
         await session.execute(text("""
             INSERT INTO energy.swap_event (swap_order_id, event, payload, actor_account_id)
             VALUES (:swap_order_id, :event, CAST(:payload AS jsonb), :actor_account_id)
-        """), {"swap_order_id": swap_order_id, "event": event, "payload": payload,
+        """), {"swap_order_id": swap_order_id, "event": event, "payload": _j(payload),
                "actor_account_id": actor_account_id})
         await session.flush()
 
