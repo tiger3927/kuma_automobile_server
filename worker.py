@@ -51,6 +51,9 @@ JOBS.extend([
     Job("alarm_rules", alarm_rules.overspeed_and_brake, interval_s=300, lock_ttl=290),
     Job("fence_exit", alarm_rules.fence_exit, interval_s=600, lock_ttl=590),
     Job("mileage_anomaly", alarm_rules.mileage_anomaly, interval_s=1800, lock_ttl=1700),
+    # 静默到期回 open。缺了它，silenced 就成了永久屏蔽，
+    # 而且同类抑制窗口会把后续告警全部吃掉（抑制条件包含 status='silenced'）。
+    Job("alarm_snooze", alarm_rules.snooze_expiry, interval_s=120, lock_ttl=110),
     Job("outbox_publish", _outbox_publish, interval_s=5, lock_ttl=10),
     Job("retention", retention.ensure_partitions, interval_s=3600, lock_ttl=3500),
     Job("rep_refresh", retention.refresh_rep_views, interval_s=3600, lock_ttl=3500),

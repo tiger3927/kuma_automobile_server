@@ -66,6 +66,18 @@ class TripMileage(Base):
 
 
 class Alarm(Base):
+    """告警。状态机（2026-10-22 定，`status` 列无 CHECK，取值域由代码与文档约束）：
+
+        open ──ack──> ack ──close──> closed
+          │              ↑              │
+          ├──silence──> silenced ──────┤      snooze_until 到期由 worker 自动回 open
+          └──close────────────────────>┘      reopen: closed → open（必须带 reason，留审计）
+        auto_closed：系统自动关（如 offline 告警在车辆恢复上报时）。
+
+    `snooze_until` 只对被静默的告警有意义；它同时是"同类新告警不再新建"的抑制依据
+    （见 `AlarmRepo.raise_alarm` 的 NOT EXISTS）。
+    """
+
     __tablename__ = "alarm"
     __table_args__ = (
         UniqueConstraint("vin", "ts", "type"),
@@ -79,7 +91,35 @@ class Alarm(Base):
     level: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=2)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="open")
+    snooze_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class AlarmRule(Base):
+    """告警阈值配置（迁移 0006）。此前阈值硬编码在 `tasks/alarm_rules.py:20-21`
+    （`SPEED_LIMIT_KMH=80` / `HARSH_BRAKE_DROP=25`），改一次要发一次版。
+
+    `region_code` 为 NULL = 全局默认；非 NULL = 该地区覆盖（§12.1 禁止代码写死国家，
+    阈值属于地区差异——不同国家限速不同，必须能配）。
+    """
+
+    __tablename__ = "alarm_rule"
+    __table_args__ = (
+        UniqueConstraint("type", "region_code"),
+        {"schema": "biz"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    region_code: Mapped[str | None] = mapped_column(CHAR(2), ForeignKey("core.region.country_code"))
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=True)
+    level: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=2)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    dedupe_window_s: Mapped[int] = mapped_column(nullable=False, default=600)
+    updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 

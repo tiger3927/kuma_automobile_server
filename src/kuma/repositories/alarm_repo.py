@@ -2,29 +2,92 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Select, select, text
+from sqlalchemy import Select, exists, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..core.pagination import PageParams
 from ..core.scope import Principal
-from ..models.biz import Alarm, AlarmAck
+from ..models.biz import Alarm, AlarmAck, AlarmRule
 from ..models.core import Vehicle
 from .base import vehicle_scope
+
+# 未了结状态：抑制窗口只看这些。closed/auto_closed 是终态，不影响新告警。
+OPENISH = ("open", "ack", "silenced")
 
 
 class AlarmRepo:
     async def raise_alarm(self, session, *, vin: str, ts: datetime, type_: str,
-                          level: int = 2, payload: dict | None = None) -> bool:
-        """ON CONFLICT DO NOTHING：返回是否新建。"""
+                          level: int = 2, payload: dict | None = None,
+                          dedupe_window_s: int = 600) -> bool:
+        """ON CONFLICT DO NOTHING + **同类抑制**：返回是否真的新建了。
+
+        只靠 `UNIQUE(vin,ts,type)` 挡不住"同一辆车 5 分钟内超速 30 次"——每条 `ts` 不同，
+        会刷出 30 条告警把运营淹没，也把 WS 推送刷爆。抑制窗口来自
+        `biz.alarm_rule.dedupe_window_s`（2026-10-22 起，此前没有任何抑制）。
+        """
+        stmt = pg_insert(Alarm).values(
+            vin=vin, ts=ts, type=type_, level=level, payload=payload or {}, status="open",
+        )
+        if dedupe_window_s > 0:
+            blocked = select(Alarm.id).where(
+                Alarm.vin == vin,
+                Alarm.type == type_,
+                Alarm.status.in_(OPENISH),
+                Alarm.ts >= ts - timedelta(seconds=dedupe_window_s),
+                Alarm.ts <= ts,
+            ).exists()
+            stmt = stmt.where(~blocked)
         row = (await session.execute(
-            pg_insert(Alarm).values(
-                vin=vin, ts=ts, type=type_, level=level, payload=payload or {}, status="open",
-            ).on_conflict_do_nothing(index_elements=["vin", "ts", "type"])
-            .returning(Alarm.id)
+            stmt.on_conflict_do_nothing(index_elements=["vin", "ts", "type"]).returning(Alarm.id)
         )).first()
         return row is not None
+
+    async def rule(self, session, type_: str, region_code: str | None = None) -> AlarmRule | None:
+        """取阈值规则：地区覆盖优先，其次全局默认（`region_code IS NULL`）。"""
+        if region_code:
+            local = (await session.execute(
+                select(AlarmRule).where(AlarmRule.type == type_, AlarmRule.region_code == region_code)
+            )).scalar_one_or_none()
+            if local is not None:
+                return local
+        return (await session.execute(
+            select(AlarmRule).where(AlarmRule.type == type_, AlarmRule.region_code.is_(None))
+        )).scalar_one_or_none()
+
+    async def set_status(self, session, *, alarm_id: int, to_status: str,
+                         snooze_until: datetime | None = None) -> Alarm | None:
+        """状态落库（合法性由 service 层的迁移表判定，这里只写）。"""
+        alarm = await session.get(Alarm, alarm_id)
+        if alarm is None:
+            return None
+        alarm.status = to_status
+        alarm.snooze_until = snooze_until
+        alarm.updated_at = datetime.now(UTC)
+        await session.flush()
+        return alarm
+
+    async def expired_snoozes(self, session, *, limit: int = 500) -> list[Alarm]:
+        """静默到期、该回到 open 的告警（worker 的 `alarm_snooze` 任务用）。"""
+        return (await session.execute(
+            select(Alarm).where(Alarm.status == "silenced", Alarm.snooze_until < datetime.now(UTC))
+            .limit(limit)
+        )).scalars().all()
+
+    async def auto_close(self, session, *, vins: list[str], type_: str) -> int:
+        """条件自然消失时自动了结（目前用于 offline 告警：车恢复上报就关）。
+
+        只碰 `open`/`ack`——已被人工静默或关闭的不覆盖，人的判断优先于自动逻辑。
+        """
+        if not vins:
+            return 0
+        result = await session.execute(
+            update(Alarm)
+            .where(Alarm.vin.in_(vins), Alarm.type == type_, Alarm.status.in_(("open", "ack")))
+            .values(status="auto_closed", snooze_until=None, updated_at=datetime.now(UTC))
+        )
+        return int(result.rowcount or 0)
 
     def page(self, principal: Principal, *, vin: str | None = None,   # 见 vehicle_repo：方法别叫 list
              status: str | None = None, type_: str | None = None,

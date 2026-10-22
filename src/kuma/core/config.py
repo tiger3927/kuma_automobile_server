@@ -83,6 +83,22 @@ class Settings(BaseSettings):
     cmd_timeout: int = Field(20, alias="KUMA_CMD_TIMEOUT")
     cmd_speed_limit_kmh: float = Field(5.0, alias="KUMA_CMD_SPEED_LIMIT_KMH")
 
+    # 入站闸门（§8.7）：单车每分钟消息上限。
+    # 2026-10-22 之前 `rate_check()` 已实现但**没接进 `_route()` 热路径**，等于形同虚设
+    # （一台车狂发只受全局 flush 批量与队列背压约束）。车端正常 10s 上报 = 6 条/分钟，
+    # 60 是 10 倍余量；突发补报靠 dedup 与 backfill 窗口，不受这个限制影响正常流量。
+    rate_limit_per_min: int = Field(60, alias="KUMA_RATE_LIMIT_PER_MIN")
+
+    # 告警（M5）：同类告警抑制窗口 + 默认静默时长。
+    # 阈值本身（超速 km/h、急刹降幅）从硬编码常量迁到 `biz.alarm_rule` 表，见迁移 0006。
+    alarm_dedupe_window_s: int = Field(600, alias="KUMA_ALARM_DEDUPE_WINDOW_S")
+    alarm_silence_default_s: int = Field(3600, alias="KUMA_ALARM_SILENCE_DEFAULT_S")
+
+    # 订阅到期（C6）：到期先进宽限期（只降级：停 WS 推送与下行指令），宽限期过完转 expired。
+    # 业务口径由本次决策定：**不删数据、不停遥测入库**——遥测是合规与结算的依据，
+    # 订阅买的的是"服务"（实时推送 + 控制），不是"记录权"。
+    sub_grace_days: int = Field(7, alias="KUMA_SUB_GRACE_DAYS")
+
     # 地图
     google_key: str = Field("", alias="KUMA_GOOGLE_KEY")
     amap_key: str = Field("", alias="KUMA_AMAP_KEY")

@@ -32,6 +32,9 @@ class MqttGateway:
         self._mqtt: aiomqtt.Client | None = None
         self._outbound: Outbound | None = None
         self._tasks: list[asyncio.Task] = []
+        # 单车速率闸门的计数（/stats 暴露）。0 意味着没有车被限流；
+        # 持续非 0 说明有设备在狂发，或 `KUMA_RATE_LIMIT_PER_MIN` 设得比固件上报频率还低。
+        self.rate_limited = 0
 
     async def run(self) -> None:
         await self.inbound.start()
@@ -76,6 +79,16 @@ class MqttGateway:
         # 车端凭据由 RabbitMQ ACL 保证；这里再校验 topic 结构合法性并留痕。
         if not topic_matches_vin(topic, vin):
             log.warn("gateway.vin_mismatch", topic=topic)
+            return
+
+        # 单车速率闸门（§8.7）。2026-10-22 之前 `rate_check()` 已写好但**从未被调用**，
+        # 这条闸门实际不存在：一台车狂发只受全局队列背压约束，别人的车跟着遭殃。
+        # 放在 decode 之前——被限流的消息不该再消耗 codec CPU。
+        if not await rate_check(vin, self.s.rate_limit_per_min):
+            self.rate_limited += 1
+            if self.rate_limited % 50 == 1:      # 限流留痕本身也要限频，否则日志会被刷爆
+                log.warn("gateway.rate_limited", vin=vin, total=self.rate_limited,
+                         limit_per_min=self.s.rate_limit_per_min)
             return
 
         decoded = decode(payload)

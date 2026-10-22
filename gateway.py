@@ -53,7 +53,10 @@ async def stats() -> dict:
             "queue_depth": _GW.inbound.queue_depth(),
             "received": s.received, "inserted": s.inserted,
             "dup_dropped": s.dup_dropped, "stale_dropped": s.stale_dropped,
-            "queue_dropped": s.queue_dropped, "decoded_error": s.decoded_error}
+            "queue_dropped": s.queue_dropped, "decoded_error": s.decoded_error,
+            # 单车速率闸门（§8.7）丢弃数。持续非 0 只有两种解释：
+            # 有设备在狂发，或 KUMA_RATE_LIMIT_PER_MIN 设得比固件上报频率还低。
+            "rate_limited": _GW.rate_limited}
 
 
 async def main() -> None:

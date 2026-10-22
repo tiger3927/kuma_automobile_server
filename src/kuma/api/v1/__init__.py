@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from . import (
     alarms,
+    audit,
     auth,
     commands,
     fleet,
@@ -29,4 +30,5 @@ api_router.include_router(trips.router)
 api_router.include_router(alarms.router)
 api_router.include_router(commands.router)
 api_router.include_router(gov.router)
+api_router.include_router(audit.router)     # R_AUDIT 只读；查审计本身也写审计
 api_router.include_router(ws.router)

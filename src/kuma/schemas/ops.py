@@ -31,6 +31,21 @@ class AckIn(BaseModel):
     note: str | None = None
 
 
+class SilenceIn(BaseModel):
+    snooze_s: int | None = Field(
+        default=None, ge=60, le=2_592_000,
+        description="静默秒数（60s ~ 30 天）；留空用 KUMA_ALARM_SILENCE_DEFAULT_S")
+    note: str | None = None
+
+
+class CloseIn(BaseModel):
+    note: str | None = None
+
+
+class ReopenIn(BaseModel):
+    note: str = Field(min_length=3, description="重开原因，必填且写进审计")
+
+
 class FenceIn(BaseModel):
     name: str
     fence_type: str
