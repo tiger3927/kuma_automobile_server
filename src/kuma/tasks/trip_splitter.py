@@ -44,8 +44,16 @@ async def close_idle_trips() -> None:
             trip = await session.get(Trip, trip_id)
             if trip is None:
                 continue
+            # 车端时钟异常（补报点的 ts 早于行程开始）会让 end_ts < start_ts，
+            # 于是 `recalc_mileage` 里的 `check_time_window` 直接抛 "start 晚于 end"，
+            # 行程卡在 active、trip_close 每 180s 重复失败（2026-10-22 端到端实测抓到）。
+            # 这里兜住并留痕，而不是让它静默卡死。
+            end_ts = last_ts if last_ts >= trip.start_ts else trip.start_ts
+            if end_ts != last_ts:
+                log.warn("trip.clock_anomaly", trip_id=trip_id, vin=vin,
+                         start_ts=str(trip.start_ts), last_report=str(last_ts))
             trip.status = "completed"
-            trip.end_ts = last_ts
+            trip.end_ts = end_ts
             last_odo = (await session.execute(
                 select(Telemetry.odo_km).where(Telemetry.vin == vin, Telemetry.ts <= last_ts)
                 .order_by(Telemetry.ts.desc()).limit(1)
