@@ -19,10 +19,12 @@ from sqlalchemy import select, text
 
 from ..core.db import get_engine, tx
 from ..core.logging import get_logger
+from ..core.outbox import emit
 from ..geo.fence import inside_operating_area
 from ..models.biz import AlarmRule
 from ..repositories.alarm_repo import AlarmRepo
 from ..repositories.state_repo import StateRepo
+from ..services.alarm_service import raise_alarm
 
 log = get_logger("tasks.alarms")
 
@@ -88,13 +90,12 @@ async def overspeed_and_brake() -> None:
 
     raised = 0
     async with tx() as session:
-        repo = AlarmRepo()
         for r in overspeed:
             region = r["region_id"]
             limit_kmh = float(_pick(speed_rules, region, "speed_kmh"))
             if float(r["speed"]) <= limit_kmh:          # 精筛：按该地区自己的限速
                 continue
-            if await repo.raise_alarm(
+            if await raise_alarm(
                 session, vin=r["vin"], ts=r["ts"], type_="overspeed",
                 level=int(_pick(speed_rules, region, "level") or 2),
                 payload={"speed_kmh": float(r["speed"]), "limit_kmh": limit_kmh,
@@ -104,7 +105,7 @@ async def overspeed_and_brake() -> None:
                 raised += 1
         for r in harsh:
             region = r["region_id"]
-            if await repo.raise_alarm(
+            if await raise_alarm(
                 session, ts=r["ts"], vin=r["vin"], type_="harsh_brake",
                 level=int(_pick(brake_rules, region, "level") or 2),
                 payload={"from": float(r["prev_speed"]), "to": float(r["speed_kmh"]),
@@ -133,13 +134,12 @@ async def fence_exit() -> None:
     state = StateRepo()
     hits = 0
     async with tx() as session:
-        repo = AlarmRepo()
         for org_id, vin, _vid in rows:
             live = await state.get(vin)
             if not live or live.get("lon") is None:
                 continue
             outside = not await inside_operating_area(live["lon"], live["lat"], org_id)
-            if outside and await repo.raise_alarm(
+            if outside and await raise_alarm(
                 session, vin=vin, ts=_now(), type_="fence_exit",
                 level=int(_pick(rules, live.get("region"), "level") or 3),
                 payload={"org_id": org_id, "lon": live["lon"], "lat": live["lat"]},
@@ -160,9 +160,8 @@ async def mileage_anomaly() -> None:
                                    {"since": since})).mappings().all()
     raised = 0
     async with tx() as session:
-        repo = AlarmRepo()
         for r in rows:
-            if await repo.raise_alarm(
+            if await raise_alarm(
                 session, vin=r["vin"], ts=_now(), type_="mileage_anomaly",
                 level=int(_pick(rules, None, "level") or 3),
                 payload={"trip_id": r["trip_id"], "odo_m": r["odo_m"], "gps_m": r["gps_m"],
@@ -185,6 +184,9 @@ async def snooze_expiry() -> None:
             alarm.status = "open"
             alarm.snooze_until = None
             alarm.updated_at = _now()
+            await emit(session, aggregate_type="alarm", aggregate_id=alarm.id,
+                       event_type="unsilenced",
+                       payload={"vin": alarm.vin, "type": alarm.type, "to": "open"})
         if rows:
             await session.flush()
     if rows:

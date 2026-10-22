@@ -21,8 +21,11 @@ OPENISH = ("open", "ack", "silenced")
 class AlarmRepo:
     async def raise_alarm(self, session, *, vin: str, ts: datetime, type_: str,
                           level: int = 2, payload: dict | None = None,
-                          dedupe_window_s: int = 600) -> bool:
-        """ON CONFLICT DO NOTHING + **同类抑制**：返回是否真的新建了。
+                          dedupe_window_s: int = 600) -> int | None:
+        """ON CONFLICT DO NOTHING + **同类抑制**：返回新建告警的 id（被抑制/冲突时 None）。
+
+        返回 id 而不是 bool，是为了让调用方能在**同一事务**里写 outbox 事件
+        （`services/alarm_service.raise_alarm` 是唯一入口，见 C1）。
 
         只靠 `UNIQUE(vin,ts,type)` 挡不住"同一辆车 5 分钟内超速 30 次"——每条 `ts` 不同，
         会刷出 30 条告警把运营淹没，也把 WS 推送刷爆。抑制窗口来自
@@ -53,7 +56,7 @@ class AlarmRepo:
         row = (await session.execute(
             stmt.on_conflict_do_nothing(index_elements=["vin", "ts", "type"]).returning(Alarm.id)
         )).first()
-        return row is not None
+        return int(row[0]) if row else None
 
     async def rule(self, session, type_: str, region_code: str | None = None) -> AlarmRule | None:
         """取阈值规则：地区覆盖优先，其次全局默认（`region_code IS NULL`）。"""
@@ -86,19 +89,21 @@ class AlarmRepo:
             .limit(limit)
         )).scalars().all()
 
-    async def auto_close(self, session, *, vins: list[str], type_: str) -> int:
+    async def auto_close(self, session, *, vins: list[str], type_: str) -> list[tuple[int, str]]:
         """条件自然消失时自动了结（目前用于 offline 告警：车恢复上报就关）。
 
         只碰 `open`/`ack`——已被人工静默或关闭的不覆盖，人的判断优先于自动逻辑。
+        返回 `(alarm_id, vin)` 而不是条数：调用方要为每条告警写 outbox 事件（C1）。
         """
         if not vins:
-            return 0
-        result = await session.execute(
+            return []
+        rows = (await session.execute(
             update(Alarm)
             .where(Alarm.vin.in_(vins), Alarm.type == type_, Alarm.status.in_(("open", "ack")))
             .values(status="auto_closed", snooze_until=None, updated_at=datetime.now(UTC))
-        )
-        return int(result.rowcount or 0)
+            .returning(Alarm.id, Alarm.vin)
+        )).all()
+        return [(int(r[0]), str(r[1])) for r in rows]
 
     def page(self, principal: Principal, *, vin: str | None = None,   # 见 vehicle_repo：方法别叫 list
              status: str | None = None, type_: str | None = None,

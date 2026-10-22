@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from ..core.config import get_settings
 from ..core.db import tx
 from ..core.logging import get_logger
+from ..core.outbox import emit
 from ..models.biz import Trip
 from ..models.core import Vehicle
 from ..models.tele import Telemetry
@@ -61,8 +62,16 @@ async def close_idle_trips() -> None:
             if last_odo is not None:
                 trip.end_odo_km = int(last_odo)
             await session.flush()
-            await TripService().recalc_mileage(session, trip_id)
-            log.info("trip.closed", trip_id=trip_id, vin=vin, end_ts=str(last_ts))
+            mileage = await TripService().recalc_mileage(session, trip_id)
+            await emit(session, aggregate_type="trip", aggregate_id=trip_id,
+                       event_type="closed",
+                       payload={"vin": vin, "status": "completed",
+                                "start_ts": trip.start_ts, "end_ts": trip.end_ts,
+                                "start_odo_km": trip.start_odo_km,
+                                "end_odo_km": trip.end_odo_km,
+                                "accounts": [a for a in (trip.owner_account_id,) if a]})
+            log.info("trip.closed", trip_id=trip_id, vin=vin, end_ts=str(last_ts),
+                     mileage=mileage)
 
 
 async def open_trip_for_vin(session, vehicle: Vehicle, *, ts: datetime,
@@ -89,4 +98,8 @@ async def open_trip_for_vin(session, vehicle: Vehicle, *, ts: datetime,
     )
     session.add(trip)
     await session.flush()
+    await emit(session, aggregate_type="trip", aggregate_id=trip.id, event_type="opened",
+               payload={"vin": vehicle.vin, "status": "active", "start_ts": trip.start_ts,
+                        "start_odo_km": trip.start_odo_km,
+                        "accounts": [a for a in (vehicle.owner_account_id,) if a]})
     return trip, True

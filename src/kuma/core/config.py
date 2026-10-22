@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     cmd_timeout: int = Field(20, alias="KUMA_CMD_TIMEOUT")
     cmd_speed_limit_kmh: float = Field(5.0, alias="KUMA_CMD_SPEED_LIMIT_KMH")
 
+    # 连接风暴闸门（C9，§8.7 的连接侧）：MQTT 每次连接都会回调 /internal/mqtt-auth/user，
+    # 所以这里是"每分钟连接次数"，不是消息数。
+    # 单车 10 次/分钟 = 正常重连（掉线重连、网络抖动）的 5 倍以上余量；
+    # 全局 300 次/分钟按 100 台试点算 = 每台每分钟最多 3 次连接也不会触发。
+    # 超限直接 `deny`：argon2 校验在闸门之后，风暴不会打满 api CPU。
+    mq_connect_per_vin_per_min: int = Field(10, alias="KUMA_MQ_CONNECT_PER_VIN_PER_MIN")
+    mq_connect_burst_per_min: int = Field(300, alias="KUMA_MQ_CONNECT_BURST_PER_MIN")
+
     # 入站闸门（§8.7）：单车每分钟消息上限。
     # 2026-10-22 之前 `rate_check()` 已实现但**没接进 `_route()` 热路径**，等于形同虚设
     # （一台车狂发只受全局 flush 批量与队列背压约束）。车端正常 10s 上报 = 6 条/分钟，

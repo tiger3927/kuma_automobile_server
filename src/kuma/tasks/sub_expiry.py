@@ -25,6 +25,7 @@ from ..core.audit import write_audit
 from ..core.config import get_settings
 from ..core.db import tx
 from ..core.logging import get_logger
+from ..core.outbox import emit
 from ..models.core import Subscription, SubscriptionPlan
 
 log = get_logger("tasks.sub_expiry")
@@ -44,9 +45,18 @@ async def run() -> None:
         )).scalars().all()
 
         for sub in due:
+            if sub.end_at is None:      # 查询已滤 NULL，这里只是让类型成立（防御兜底）
+                continue
             if sub.status == "grace":
-                sub.status = "expired"
-                expired += 1
+                # ⚠️ 宽限期是**墙钟时长**，不是"下一轮任务"：任务每小时跑一次，
+                # 无条件 grace→expired 会把 7 天宽限期压缩成 1 小时（2026-10-22 自查抓到）。
+                if sub.end_at + grace <= now:
+                    sub.status = "expired"
+                    expired += 1
+                    await emit(session, aggregate_type="subscription", aggregate_id=sub.id,
+                               event_type="expired",
+                               payload={"vin": sub.vin, "status": "expired",
+                                        "end_at": sub.end_at})
                 continue
             plan = await session.get(SubscriptionPlan, sub.plan_id)
             if sub.auto_renew and plan is not None and plan.status == "active":
@@ -60,9 +70,17 @@ async def run() -> None:
                                   before={"end_at": old_end, "plan_id": plan.id},
                                   after={"end_at": sub.end_at, "plan_id": plan.id,
                                          "trigger": "auto"})
+                await emit(session, aggregate_type="subscription", aggregate_id=sub.id,
+                           event_type="renewed",
+                           payload={"vin": sub.vin, "status": "active", "plan_id": plan.id,
+                                    "from_end_at": old_end, "end_at": sub.end_at})
                 continue
             sub.status = "grace"
             to_grace += 1
+            await emit(session, aggregate_type="subscription", aggregate_id=sub.id,
+                       event_type="grace",
+                       payload={"vin": sub.vin, "status": "grace", "end_at": sub.end_at,
+                                "grace_until": sub.end_at + grace})
 
     log.info("sub_expiry.done", scanned=len(due), renewed=renewed,
              to_grace=to_grace, expired=expired)

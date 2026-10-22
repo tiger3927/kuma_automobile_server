@@ -17,12 +17,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.audit import write_audit
 from ..core.config import get_settings
 from ..core.exceptions import Conflict, NotFound, ValidationFailed
+from ..core.outbox import emit
 from ..core.pagination import PageParams
 from ..core.scope import Principal
 from ..models.biz import Alarm, AlarmAck
 from ..models.core import Vehicle
 from ..repositories.alarm_repo import AlarmRepo
 from ..repositories.base import assert_vehicle_visible
+
+
+async def raise_alarm(session: AsyncSession, *, vin: str, ts: datetime, type_: str,
+                      level: int = 2, payload: dict | None = None,
+                      dedupe_window_s: int = 600) -> int | None:
+    """建告警的**唯一入口**：抑制判定 + outbox 事件必须同事务（C1）。
+
+    之前 5 个调用点（gateway 直推、超速、急刹、围栏越界、里程异常、离线）各自直接调 repo，
+    事件要么没有、要么在事务外发（发出去了但业务回滚 = 幽灵事件）。
+    """
+    alarm_id = await AlarmRepo().raise_alarm(
+        session, vin=vin, ts=ts, type_=type_, level=level, payload=payload,
+        dedupe_window_s=dedupe_window_s)
+    if alarm_id is not None:
+        await emit(session, aggregate_type="alarm", aggregate_id=alarm_id, event_type="created",
+                   payload={"vin": vin, "type": type_, "level": level, "ts": ts})
+    return alarm_id
 
 # 状态机（取值域写在这里，DB 的 status 列没有 CHECK——加状态只改这一处）。
 ALLOWED: dict[str, set[str]] = {
@@ -73,6 +91,9 @@ class AlarmService:
             raise Conflict("alarm_not_open")
         await write_audit(session, actor=principal, action="alarm.ack",
                           resource_type="alarm", resource_id=alarm_id, after={"note": note}, ip=ip)
+        await emit(session, aggregate_type="alarm", aggregate_id=alarm_id, event_type="acked",
+                   payload={"vin": alarm.vin, "type": alarm.type, "status": alarm.status,
+                            "by": principal.account_id})
         return {"id": alarm.id, "status": alarm.status}
 
     async def transition(self, session: AsyncSession, principal: Principal, alarm_id: int,
@@ -104,6 +125,11 @@ class AlarmService:
                           before={"status": from_status},
                           after={"status": to_status, "note": note,
                                  "snooze_until": snooze_until}, ip=ip)
+        await emit(session, aggregate_type="alarm", aggregate_id=alarm_id,
+                   event_type=to_status,
+                   payload={"vin": alarm.vin, "type": alarm.type, "from": from_status,
+                            "to": to_status, "by": principal.account_id,
+                            "snooze_until": snooze_until})
         return {"id": updated.id, "status": updated.status, "snooze_until": updated.snooze_until}
 
     # ── 内部 ────────────────────────────────────────────────────

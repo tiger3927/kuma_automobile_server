@@ -80,14 +80,28 @@ async def bind_device(vin: str, body: DeviceBindIn, request: Request, session: D
 @router.post("/{vin}/credential")
 async def issue_credential(vin: str, request: Request, session: Db,
                            principal: PrincipalDep) -> dict:
+    """下发 T-Box 凭据（C5）。明文口令**只在这次响应里出现一次**，库里只有哈希。"""
     return await svc.issue_credential(session, principal, vin, ip=client_ip(request))
+
+
+@router.get("/{vin}/credential")
+async def credential_status(vin: str, session: Db, principal: PrincipalDep) -> dict:
+    """凭据状态（版本/状态/签发与吊销时间）——不含口令与哈希。"""
+    return await svc.credential_status(session, principal, vin)
+
+
+@router.post("/{vin}/credential/rotate")
+async def rotate_credential(vin: str, request: Request, session: Db,
+                            principal: PrincipalDep) -> dict:
+    """轮换：口令泄露或设备转手。旧口令立即失效（MQTT 每次连接都回库校验）。"""
+    return await svc.rotate_credential(session, principal, vin, ip=client_ip(request))
 
 
 @router.delete("/{vin}/credential")
 async def revoke_credential(vin: str, request: Request, session: Db,
                             principal: PrincipalDep) -> dict:
-    await svc.revoke_credential(session, principal, vin, ip=client_ip(request))
-    return {"vin": vin, "status": "revoked"}
+    """吊销：此后该 VIN 的 MQTT 连接与 publish 都会被拒。"""
+    return await svc.revoke_credential(session, principal, vin, ip=client_ip(request))
 
 
 @router.post("/{vin}/subscription")

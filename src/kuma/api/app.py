@@ -16,6 +16,7 @@ from ..core.lifespan import lifespan
 from ..core.middleware import RateLimit, RequestContext
 from ..core.redis_client import healthcheck as redis_health
 from ..mqtt import auth as mqtt_auth
+from ..realtime import events_bridge
 from ..realtime.manager import manager
 from .v1 import api_router
 
@@ -25,6 +26,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     async def _startup() -> None:
         await manager.start()
+        # C1：业务事件（outbox → kuma.events）→ Redis pubsub → WS。
+        # 必须在 bus 已连上之后（lifespan 里 connect 先于 on_startup）。
+        await events_bridge.start()
 
     async def _shutdown() -> None:
         await manager.stop()          # 先停 pubsub（§12-4）
@@ -61,6 +65,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from ..core.redis_client import get_redis
 
         return {"role": s.role, "ws_connections": len(manager._by_vin),
-                "redis_ping": (await get_redis().ping())}
+                "redis_ping": (await get_redis().ping()),
+                # C1：事件桥的投递计数（0 且 outbox 有行 = 桥没接上）
+                **events_bridge.counters(),
+                # C9：连接闸门拒绝数（持续增长 = 设备侧退避没生效或在被攻击）
+                "mqtt_connect_denied": mqtt_auth.connect_denied}
 
     return app

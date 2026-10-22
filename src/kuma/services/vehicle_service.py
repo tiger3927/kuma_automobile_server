@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import write_audit
 from ..core.exceptions import Conflict, InvalidState, NotFound, ValidationFailed
+from ..core.outbox import emit
 from ..core.pagination import PageParams
 from ..core.scope import Principal
 from ..core.security import ahash_password
@@ -114,6 +115,9 @@ class VehicleService:
         await write_audit(session, actor=principal, action="vehicle.status",
                           resource_type="vehicle", resource_id=vin,
                           before=before, after={"status": new_status}, ip=ip)
+        await emit(session, aggregate_type="vehicle", aggregate_id=vehicle.id,
+                   event_type="status",
+                   payload={"vin": vin, "from": before["status"], "to": new_status})
         return vehicle
 
     async def bind_device(self, session: AsyncSession, principal: Principal, vin: str,
@@ -144,9 +148,16 @@ class VehicleService:
 
     async def issue_credential(self, session: AsyncSession, principal: Principal, vin: str,
                                ip: str | None = None) -> dict:
-        """一机一密：M2 只生成，**下发在 M9 交付核销 + 订阅生效之后**（§8.3）。
+        """一机一密下发（C5，2026-10-22 定口径）。
 
-        返回明文口令仅一次；库里只存哈希。
+        **下发协议 v1**：口令由 `dealer_staff`/`platform_staff` 在交付核销时经管理端领取，
+        明文**只在这次响应里出现一次**（库里只有 argon2id 哈希，事后查不到），
+        由安装人员写入 T-Box。设备自助 bootstrap（出厂密钥换凭据）需要产线流程与
+        `vehicle_credential` 加列，v1 不做——但**轮换与吊销必须先能用**，
+        否则设备被盗就只能报废 T-Box。
+
+        ⚠️ 旧实现 `session.add(cred)` 在已有凭据时是**主键冲突 500**（注释写着 upsert，
+        实际 SQLAlchemy 不会 upsert）。这里改成"有就更新版本"。
         """
         principal.require("vehicle_master", "write")
         vehicle = await self.repo.get_by_vin(session, vin)
@@ -155,31 +166,76 @@ class VehicleService:
         assert_vehicle_visible(principal, vehicle)
 
         raw = secrets.token_urlsafe(24)
-        existing = await session.get(VehicleCredential, vin)
-        version = (existing.version + 1) if existing else 1
-        cred = VehicleCredential(
-            vin=vin, mqtt_username=vin, password_hash=await ahash_password(raw),
-            version=version, status="active", issued_at=datetime.now(UTC), revoked_at=None,
-        )
-        session.add(cred)  # 主键冲突 → upsert
+        cred = await session.get(VehicleCredential, vin)
+        first_issue = cred is None
+        if cred is None:
+            cred = VehicleCredential(vin=vin, mqtt_username=vin, version=1, status="active")
+            session.add(cred)
+        else:
+            cred.version += 1
+        cred.password_hash = await ahash_password(raw)
+        cred.status = "active"
+        cred.issued_at = datetime.now(UTC)
+        cred.revoked_at = None
         await session.flush()
-        await write_audit(session, actor=principal, action="vehicle.credential_issue",
+
+        action = "vehicle.credential_issue" if first_issue else "vehicle.credential_rotate"
+        event = "issued" if first_issue else "rotated"
+        await write_audit(session, actor=principal, action=action,
                           resource_type="vehicle", resource_id=vin,
-                          after={"version": version}, ip=ip)
-        return {"vin": vin, "mqtt_username": vin, "password": raw, "version": version,
-                "delivered": False, "note": "凭据已生成，交付核销 + 订阅生效后才下发"}
+                          after={"version": cred.version}, ip=ip)
+        # 事件里**绝不带口令**：outbox 会进 MQ、可能被多个消费者读到。
+        await emit(session, aggregate_type="vehicle.credential", aggregate_id=vin,
+                   event_type=event,
+                   payload={"vin": vin, "version": cred.version, "status": cred.status,
+                            "by": principal.account_id})
+        return {"vin": vin, "mqtt_username": vin, "password": raw, "version": cred.version,
+                "delivered": False,
+                "note": "口令只显示一次；请立即写入 T-Box，丢失只能 rotate"}
+
+    async def rotate_credential(self, session: AsyncSession, principal: Principal, vin: str,
+                                ip: str | None = None) -> dict:
+        """轮换：口令泄露/设备转手时用。旧口令**立即失效**（每次 MQTT 连接都回库校验）。"""
+        principal.require("vehicle_master", "write")
+        if await session.get(VehicleCredential, vin) is None:
+            raise NotFound("credential_not_found")
+        return await self.issue_credential(session, principal, vin, ip=ip)
+
+    async def credential_status(self, session: AsyncSession, principal: Principal,
+                                vin: str) -> dict:
+        """只读状态，**不返回口令**（哈希也不返回）。"""
+        principal.require("vehicle_master", "read")
+        vehicle = await self.repo.get_by_vin(session, vin)
+        if vehicle is None:
+            raise NotFound("vehicle_not_found")
+        assert_vehicle_visible(principal, vehicle)
+        cred = await session.get(VehicleCredential, vin)
+        if cred is None:
+            return {"vin": vin, "status": "none", "version": 0}
+        return {"vin": vin, "mqtt_username": cred.mqtt_username, "status": cred.status,
+                "version": cred.version, "issued_at": cred.issued_at,
+                "revoked_at": cred.revoked_at}
 
     async def revoke_credential(self, session: AsyncSession, principal: Principal, vin: str,
-                                ip: str | None = None) -> None:
+                                ip: str | None = None) -> dict:
+        """吊销：设备被盗/报废。此后该 VIN 的 MQTT 连接会被拒（`verify_credential` 查 status）。"""
         principal.require("vehicle_master", "write")
         cred = await session.get(VehicleCredential, vin)
         if cred is None:
             raise NotFound("credential_not_found")
+        if cred.status == "revoked":
+            raise InvalidState("credential_already_revoked")
         cred.status = "revoked"
         cred.revoked_at = datetime.now(UTC)
         await session.flush()
         await write_audit(session, actor=principal, action="vehicle.credential_revoke",
-                          resource_type="vehicle", resource_id=vin, ip=ip)
+                          resource_type="vehicle", resource_id=vin,
+                          before={"status": "active"}, after={"status": "revoked"}, ip=ip)
+        await emit(session, aggregate_type="vehicle.credential", aggregate_id=vin,
+                   event_type="revoked",
+                   payload={"vin": vin, "version": cred.version, "status": "revoked",
+                            "by": principal.account_id})
+        return {"vin": vin, "status": "revoked", "version": cred.version}
 
     async def activate_subscription(self, session: AsyncSession, principal: Principal, vin: str,
                                     plan_id: int, ip: str | None = None) -> Subscription:
@@ -208,6 +264,11 @@ class VehicleService:
         await write_audit(session, actor=principal, action="subscription.activate",
                           resource_type="vehicle", resource_id=vin,
                           after={"plan_id": plan_id}, ip=ip)
+        await emit(session, aggregate_type="subscription", aggregate_id=sub.id,
+                   event_type="activated",
+                   payload={"vin": vin, "plan_id": plan_id, "status": sub.status,
+                            "start_at": sub.start_at, "end_at": sub.end_at,
+                            "accounts": [principal.account_id]})
         return sub
 
     async def subscription_detail(self, session: AsyncSession, principal: Principal,
@@ -247,6 +308,10 @@ class VehicleService:
                           resource_type="vehicle", resource_id=vin,
                           before=before, after={"status": "cancelled", "auto_renew": False},
                           ip=ip)
+        await emit(session, aggregate_type="subscription", aggregate_id=sub.id,
+                   event_type="cancelled",
+                   payload={"vin": vin, "status": "cancelled", "auto_renew": False,
+                            "accounts": [principal.account_id]})
         return {"id": sub.id, "vin": vin, "status": sub.status}
 
     async def transfer_ownership(self, session: AsyncSession, principal: Principal, vin: str,
@@ -270,9 +335,15 @@ class VehicleService:
             c.status = "terminated"
             released += 1
 
+        # ⚠️ 必须在改字段**之前**抓 before：写在 mutation 之后读到的是新归属，
+        # 审计里的"变更前"会变成变更后（sub_expiry 也犯过同样的错，已修）。
+        before_owner = {"owner_type": vehicle.owner_type,
+                        "owner_account_id": vehicle.owner_account_id,
+                        "owner_org_id": vehicle.owner_org_id}
         session.add(OwnershipTransfer(
-            vin=vin, from_type=vehicle.owner_type,
-            from_account_id=vehicle.owner_account_id, from_org_id=vehicle.owner_org_id,
+            vin=vin, from_type=before_owner["owner_type"],
+            from_account_id=before_owner["owner_account_id"],
+            from_org_id=before_owner["owner_org_id"],
             to_type=to_type, to_account_id=to_account_id, to_org_id=to_org_id,
             transferred_at=datetime.now(UTC), operator_id=principal.account_id,
         ))
@@ -281,8 +352,16 @@ class VehicleService:
         await session.flush()
         await write_audit(session, actor=principal, action="vehicle.transfer",
                           resource_type="vehicle", resource_id=vin,
-                          before={"owner": vehicle.owner_account_id},
-                          after={"to_type": to_type, "released_contracts": released}, ip=ip)
+                          before=before_owner,
+                          after={"to_type": to_type, "to_account_id": to_account_id,
+                                 "to_org_id": to_org_id, "released_contracts": released}, ip=ip)
+        # 双方都要收到：原主失去车辆、新主获得车辆（WS 列表立刻刷新，不靠轮询）
+        await emit(session, aggregate_type="vehicle", aggregate_id=vehicle.id,
+                   event_type="ownership",
+                   payload={"vin": vin, "from_account": before_owner["owner_account_id"],
+                            "to_account": to_account_id,
+                            "accounts": [a for a in (before_owner["owner_account_id"],
+                                                     to_account_id) if a]})
         return {"vin": vin, "released_contracts": released}
 
     async def breakdown(self, session: AsyncSession, principal: Principal) -> list[dict]:

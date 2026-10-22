@@ -36,7 +36,8 @@ class Outbox(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     aggregate_type: Mapped[str] = mapped_column(Text, nullable=False)
-    aggregate_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 迁移 015 起是 text：聚合根不都有整数主键（`biz.command.cmd_id` 是 text）。
+    aggregate_id: Mapped[str] = mapped_column(Text, nullable=False)
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="pending")

@@ -207,6 +207,30 @@ class Bus:
         await self.channel.set_qos(prefetch_count=concurrency)
         return q
 
+    async def consume_events(self, queue: str, bindings: tuple[str, ...],
+                             handler: Callable[[dict[str, Any]], Awaitable[None]],
+                             *, concurrency: int = 50) -> AbstractQueue:
+        """声明业务事件队列并绑到 `kuma.events`（C1，2026-10-22）。
+
+        **绑定必须先于 consume**：topic 交换机在没有匹配绑定时消息直接走兜底/丢弃，
+        先起消费者再绑定会漏掉启动瞬间的事件。
+
+        队列 arguments 一旦定下就不能改（406 会关整条 channel，见 `consume()` 的注释），
+        所以这里把参数写死成常量：TTL 24h、上限 2 万条、超上限拒收（不 OOM broker）。
+        """
+        assert self._events is not None, "Bus.connect() 未调用"
+        q = await self.channel.declare_queue(
+            queue, durable=True,
+            arguments={"x-message-ttl": 86_400_000, "x-max-length": 20_000,
+                       "x-overflow": "reject-publish"},
+        )
+        for rk in bindings:
+            await q.bind(self._events, routing_key=rk)
+        await q.consume(self._wrap(handler), no_ack=False)
+        await self.channel.set_qos(prefetch_count=concurrency)
+        log.info("bus.events_consumer_bound", queue=queue, bindings=list(bindings))
+        return q
+
     @staticmethod
     def _wrap(handler: Callable[[dict[str, Any]], Awaitable[None]]):
         async def _inner(msg: AbstractIncomingMessage) -> None:   # 收消息用 IncomingMessage，才有 ack/nack

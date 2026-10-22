@@ -14,9 +14,11 @@ from sqlalchemy import select
 from ..core.config import get_settings
 from ..core.db import tx
 from ..core.logging import get_logger
+from ..core.outbox import emit
 from ..models.core import Vehicle
 from ..repositories.alarm_repo import AlarmRepo
 from ..repositories.state_repo import StateRepo
+from ..services.alarm_service import raise_alarm
 from .alarm_rules import _pick, _rules
 
 log = get_logger("tasks.offline")
@@ -56,15 +58,20 @@ async def run() -> None:
     async with tx() as session:
         repo = AlarmRepo()
         for vin, last in offline[:500]:     # 单轮上限：离线风暴时不要把事务撑爆
-            if await repo.raise_alarm(
+            if await raise_alarm(
                 session, vin=vin, ts=_now(), type_="offline", level=level,
                 payload={"last_ts": last, "ttl_s": ttl, "threshold_s": threshold_s},
                 dedupe_window_s=dedupe_s,
             ):
                 raised += 1
+        # 自动了结也要发事件：前端"告警列表只增不减"的体验靠它，不靠轮询
         closed = await repo.auto_close(session, vins=online, type_="offline")
+        for alarm_id, vin in closed:
+            await emit(session, aggregate_type="alarm", aggregate_id=alarm_id,
+                       event_type="auto_closed",
+                       payload={"vin": vin, "type": "offline", "to": "auto_closed"})
 
-    log.info("offline.raised", count=raised, auto_closed=closed)
+    log.info("offline.raised", count=raised, auto_closed=len(closed))
 
 
 def _now():

@@ -16,12 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import write_audit
 from ..core.exceptions import Forbidden, NotFound, ValidationFailed
+from ..core.outbox import emit
 from ..core.scope import Principal
 from ..models.core import Org, Region
-from ..repositories.fence_repo import FenceRepo, MAX_AREA_KM2, MIN_AREA_KM2
+from ..repositories.fence_repo import MAX_AREA_KM2, MIN_AREA_KM2, FenceRepo
 from ..schemas.ops import FenceIn, FencePatch
-
-
 
 
 class FenceService:
@@ -70,6 +69,9 @@ class FenceService:
                           after={"name": body.name, "fence_type": body.fence_type,
                                  "org_id": body.org_id, "region_id": body.region_id,
                                  "area_km2": geom["area_km2"]}, ip=ip)
+        await emit(session, aggregate_type="fence", aggregate_id=fence_id, event_type="created",
+                   payload={"name": body.name, "fence_type": body.fence_type,
+                            "org_id": body.org_id, "status": body.status})
         row = await self.repo.get(session, fence_id)
         assert row is not None
         return row
@@ -89,6 +91,10 @@ class FenceService:
                           resource_type="fence", resource_id=fence_id,
                           before={"status": before["status"], "name": before["name"]},
                           after={"status": row["status"], "name": row["name"]}, ip=ip)
+        await emit(session, aggregate_type="fence", aggregate_id=fence_id, event_type="updated",
+                   payload={"name": row["name"], "org_id": row["org_id"],
+                            "fence_type": row["fence_type"], "status": row["status"],
+                            "from_status": before["status"]})
         return row
 
     async def deactivate(self, session: AsyncSession, principal: Principal, fence_id: int,
@@ -103,6 +109,12 @@ class FenceService:
             raise NotFound("fence_not_found")
         await write_audit(session, actor=principal, action="fence.deactivate",
                           resource_type="fence", resource_id=fence_id, ip=ip)
+        # 停用必须广播：`fence_exit` 告警与派单硬过滤都读这张表，
+        # 别的进程要能在下一轮之前知道"这块区域不再受约束了"。
+        await emit(session, aggregate_type="fence", aggregate_id=fence_id,
+                   event_type="deactivated",
+                   payload={"name": row["name"], "org_id": row["org_id"],
+                            "fence_type": row["fence_type"], "status": row["status"]})
         return row
 
     async def _check_refs(self, session: AsyncSession, *, org_id: int | None,

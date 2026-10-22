@@ -22,6 +22,7 @@ from ..core.exceptions import (
     VehicleOffline,
 )
 from ..core.logging import get_logger
+from ..core.outbox import emit
 from ..core.pagination import PageParams
 from ..core.scope import Principal
 from ..models.biz import Command
@@ -107,6 +108,9 @@ class CommandService:
         await self.repo.append_audit(session, cmd_id=cmd_id, attempt=0, event="queued",
                                      actor_account_id=principal.account_id, detail={})
 
+        await emit(session, aggregate_type="command", aggregate_id=cmd_id, event_type="queued",
+                   payload={"vin": vin, "cmd_type": cmd_type, "status": cmd.status,
+                            "by": principal.account_id})
         await get_bus().publish_cmd({
             "cmd_id": cmd_id, "vin": vin, "cmd_type": cmd_type, "payload": payload or {},
             "attempt": 0, "issued_at": datetime.now(UTC).isoformat(),
@@ -147,6 +151,9 @@ class CommandService:
         await self.repo.transition(session, cmd, "acked")
         await self.repo.append_audit(session, cmd_id=cmd_id, attempt=cmd.attempt, event="acked",
                                      actor_account_id=None, detail=result)
+        await emit(session, aggregate_type="command", aggregate_id=cmd_id, event_type="acked",
+                   payload={"vin": cmd.vin, "cmd_type": cmd.cmd_type, "status": cmd.status,
+                            "result": result})
 
     async def mark_timeout(self, session: AsyncSession, cmd: Command) -> dict:
         """worker：超时重投（≤3 次，退避），超限置 failed。"""
@@ -161,12 +168,19 @@ class CommandService:
             await self.repo.append_audit(session, cmd_id=cmd.cmd_id, attempt=cmd.attempt,
                                          event="failed", actor_account_id=None,
                                          detail={"reason": "retry_exhausted"})
+            await emit(session, aggregate_type="command", aggregate_id=cmd.cmd_id,
+                       event_type="failed",
+                       payload={"vin": cmd.vin, "cmd_type": cmd.cmd_type, "status": "failed",
+                                "attempt": cmd.attempt, "reason": "retry_exhausted"})
             return {"cmd_id": cmd.cmd_id, "status": "failed"}
 
         attempt = cmd.attempt + 1
         await self.repo.transition(session, cmd, "sent", attempt=attempt)
         await self.repo.append_audit(session, cmd_id=cmd.cmd_id, attempt=attempt, event="retry",
                                      actor_account_id=None, detail={"backoff_s": 2 ** attempt})
+        await emit(session, aggregate_type="command", aggregate_id=cmd.cmd_id, event_type="retry",
+                   payload={"vin": cmd.vin, "cmd_type": cmd.cmd_type, "status": "sent",
+                            "attempt": attempt, "backoff_s": 2 ** attempt})
         await get_bus().publish_cmd({
             "cmd_id": cmd.cmd_id, "vin": cmd.vin, "cmd_type": cmd.cmd_type,
             "payload": cmd.payload, "attempt": attempt,
