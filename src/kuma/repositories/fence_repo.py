@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.db import get_engine
 
@@ -25,7 +26,12 @@ MIN_AREA_KM2 = 0.01
 
 class FenceRepo:
     async def validate_wkt(self, wkt: str) -> dict[str, Any]:
-        """把几何校验交给 PostGIS（它比我们在 Python 里解析 WKT 更权威）。"""
+        """把几何校验交给 PostGIS（它比我们在 Python 里解析 WKT 更权威）。
+
+        **故意不走请求 session**：非法 WKT 会让 PostGIS 抛错，从而把请求事务打成
+        `current transaction is aborted`，后面同一事务里的审计写入全部连带失败。
+        校验用独立连接（只读、自动回滚），写操作才用请求 session。
+        """
         engine = get_engine()
         async with engine.connect() as conn:
             row = (await conn.execute(text("""
@@ -40,23 +46,24 @@ class FenceRepo:
             """), {"wkt": wkt})).mappings().one()
         return dict(row)
 
-    async def insert(self, *, name: str, fence_type: str, org_id: int | None,
-                     region_id: str | None, wkt: str, status: str,
+    async def insert(self, session: AsyncSession, *, name: str, fence_type: str,
+                     org_id: int | None, region_id: str | None, wkt: str, status: str,
                      active_from: datetime | None, active_to: datetime | None) -> int:
-        engine = get_engine()
-        async with engine.begin() as conn:
-            return (await conn.execute(text("""
-                INSERT INTO geo.fence (name, fence_type, org_id, region_id, geom,
-                                       status, active_from, active_to)
-                VALUES (:name, :fence_type, :org_id, :region_id,
-                        ST_SetSRID(ST_GeomFromText(:wkt), 4326),
-                        :status, :active_from, :active_to)
-                RETURNING id
-            """), {"name": name, "fence_type": fence_type, "org_id": org_id,
-                   "region_id": region_id, "wkt": wkt, "status": status,
-                   "active_from": active_from, "active_to": active_to})).scalar_one()
+        """写入走请求 session：围栏写入与它的审计记录必须同事务，
+        否则会出现"围栏已生效但审计丢了"（合规硬要求）。"""
+        return (await session.execute(text("""
+            INSERT INTO geo.fence (name, fence_type, org_id, region_id, geom,
+                                   status, active_from, active_to)
+            VALUES (:name, :fence_type, :org_id, :region_id,
+                    ST_SetSRID(ST_GeomFromText(:wkt), 4326),
+                    :status, :active_from, :active_to)
+            RETURNING id
+        """), {"name": name, "fence_type": fence_type, "org_id": org_id,
+               "region_id": region_id, "wkt": wkt, "status": status,
+               "active_from": active_from, "active_to": active_to})).scalar_one()
 
-    async def page(self, *, org_id: int | None = None, org_ids: list[int] | None = None,
+    async def page(self, session: AsyncSession, *, org_id: int | None = None,
+                   org_ids: list[int] | None = None,
                    region_id: str | None = None, fence_type: str | None = None,
                    status: str | None = None, limit: int = 50, offset: int = 0) -> list[dict]:
         sql = """
@@ -83,24 +90,21 @@ class FenceRepo:
             sql += " AND status = :status"
             params["status"] = status
         sql += " ORDER BY id DESC LIMIT :limit OFFSET :offset"
-        engine = get_engine()
-        async with engine.connect() as conn:
-            rows = (await conn.execute(text(sql), params)).mappings().all()
+        rows = (await session.execute(text(sql), params)).mappings().all()
         return [dict(r) for r in rows]
 
-    async def get(self, fence_id: int) -> dict[str, Any] | None:
-        engine = get_engine()
-        async with engine.connect() as conn:
-            row = (await conn.execute(text("""
-                SELECT id, name, fence_type, org_id, region_id, status,
-                       active_from, active_to, created_at,
-                       ST_Area(geom::geography) / 1e6 AS area_km2,
-                       ST_AsText(geom)                AS wkt
-                FROM geo.fence WHERE id = :id
-            """), {"id": fence_id})).mappings().one_or_none()
+    async def get(self, session: AsyncSession, fence_id: int) -> dict[str, Any] | None:
+        row = (await session.execute(text("""
+            SELECT id, name, fence_type, org_id, region_id, status,
+                   active_from, active_to, created_at,
+                   ST_Area(geom::geography) / 1e6 AS area_km2,
+                   ST_AsText(geom)                AS wkt
+            FROM geo.fence WHERE id = :id
+        """), {"id": fence_id})).mappings().one_or_none()
         return dict(row) if row else None
 
-    async def update(self, fence_id: int, *, name: str | None = None, status: str | None = None,
+    async def update(self, session: AsyncSession, fence_id: int, *, name: str | None = None,
+                     status: str | None = None,
                      active_from: datetime | None = None,
                      active_to: datetime | None = None) -> dict[str, Any] | None:
         sets: list[str] = []
@@ -111,11 +115,9 @@ class FenceRepo:
                 sets.append(f"{col} = :{col}")
                 params[col] = val
         if not sets:
-            return await self.get(fence_id)
-        engine = get_engine()
-        async with engine.begin() as conn:
-            # 列名来自固定白名单（不是用户输入），拼接安全
-            row = (await conn.execute(text(
-                f"UPDATE geo.fence SET {', '.join(sets)} WHERE id = :id RETURNING id"
-            ), params)).mappings().one_or_none()
-        return await self.get(fence_id) if row else None
+            return await self.get(session, fence_id)
+        # 列名来自固定白名单（不是用户输入），拼接安全
+        row = (await session.execute(text(
+            f"UPDATE geo.fence SET {', '.join(sets)} WHERE id = :id RETURNING id"
+        ), params)).mappings().one_or_none()
+        return await self.get(session, fence_id) if row else None

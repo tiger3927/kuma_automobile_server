@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import write_audit
 from ..core.exceptions import Forbidden, NotFound, ValidationFailed
 from ..core.scope import Principal
+from ..models.core import Org, Region
 from ..repositories.fence_repo import MAX_AREA_KM2, MIN_AREA_KM2, FenceRepo
 from ..schemas.ops import FenceIn, FencePatch
 
@@ -25,7 +27,8 @@ from ..schemas.ops import FenceIn, FencePatch
 class FenceService:
     repo = FenceRepo()
 
-    async def page(self, principal: Principal, *, org_id: int | None = None,
+    async def page(self, principal: Principal, *, session: AsyncSession,
+                   org_id: int | None = None,
                    region_id: str | None = None, fence_type: str | None = None,
                    status: str | None = None, limit: int = 50, offset: int = 0) -> dict:
         # 非平台身份只能看自己可见 org 集合内的围栏（Principal 的字段是 `org_ids`，复数）
@@ -34,12 +37,13 @@ class FenceService:
             org_ids = principal.org_ids()      # 是方法不是属性（scope.py:146）
             if not org_ids:
                 return {"items": []}
-        return {"items": await self.repo.page(org_id=org_id, org_ids=org_ids,
+        return {"items": await self.repo.page(session, org_id=org_id, org_ids=org_ids,
                                               region_id=region_id, fence_type=fence_type,
                                               status=status, limit=limit, offset=offset)}
 
-    async def detail(self, principal: Principal, fence_id: int) -> dict:
-        row = await self.repo.get(fence_id)
+    async def detail(self, principal: Principal, session: AsyncSession,
+                     fence_id: int) -> dict:
+        row = await self.repo.get(session, fence_id)
         if row is None:
             raise NotFound("fence_not_found")
         if not principal.is_platform and row["org_id"] not in principal.org_ids():
@@ -52,9 +56,11 @@ class FenceService:
             raise Forbidden("fence_write_requires_platform")
         if body.fence_type == "operating_area" and body.org_id is None:
             raise ValidationFailed("operating_area 必须指定 org_id（派单硬过滤按 org 判定）")
+        await self._check_refs(session, org_id=body.org_id, region_id=body.region_id)
 
         geom = await self._check_geom(body.wkt_polygon)
         fence_id = await self.repo.insert(
+            session,
             name=body.name, fence_type=body.fence_type, org_id=body.org_id,
             region_id=body.region_id, wkt=body.wkt_polygon, status=body.status,
             active_from=body.active_from, active_to=body.active_to,
@@ -64,7 +70,7 @@ class FenceService:
                           after={"name": body.name, "fence_type": body.fence_type,
                                  "org_id": body.org_id, "region_id": body.region_id,
                                  "area_km2": geom["area_km2"]}, ip=ip)
-        row = await self.repo.get(fence_id)
+        row = await self.repo.get(session, fence_id)
         assert row is not None
         return row
 
@@ -72,10 +78,10 @@ class FenceService:
                     body: FencePatch, *, ip: str | None = None) -> dict:
         if not principal.is_platform:
             raise Forbidden("fence_write_requires_platform")
-        before = await self.repo.get(fence_id)
+        before = await self.repo.get(session, fence_id)
         if before is None:
             raise NotFound("fence_not_found")
-        row = await self.repo.update(fence_id, name=body.name, status=body.status,
+        row = await self.repo.update(session, fence_id, name=body.name, status=body.status,
                                      active_from=body.active_from, active_to=body.active_to)
         if row is None:
             raise NotFound("fence_not_found")
@@ -90,12 +96,33 @@ class FenceService:
         """停用而不是物理删除：围栏参与过派单与告警判定，删掉会让历史无法复现。"""
         if not principal.is_platform:
             raise Forbidden("fence_write_requires_platform")
-        row = await self.repo.update(fence_id, status="inactive")
+        if await self.repo.get(session, fence_id) is None:
+            raise NotFound("fence_not_found")
+        row = await self.repo.update(session, fence_id, status="inactive")
         if row is None:
             raise NotFound("fence_not_found")
         await write_audit(session, actor=principal, action="fence.deactivate",
                           resource_type="fence", resource_id=fence_id, ip=ip)
         return row
+
+    async def _check_refs(self, session: AsyncSession, *, org_id: int | None,
+                          region_id: str | None) -> None:
+        """外键先查再插。
+
+        2026-10-22 实测：`org_id` 填一个不存在的 id，Postgres 抛 ForeignKeyViolation，
+        接口直接 500（当时没有 IntegrityError 兜底处理器），运维看不出是自己填错了。
+        """
+        if org_id is not None:
+            found = (await session.execute(select(Org.id).where(Org.id == org_id)
+                                           )).scalar_one_or_none()
+            if found is None:
+                raise ValidationFailed(f"org {org_id} 不存在", code="fence_org_not_found")
+        if region_id is not None:
+            found = (await session.execute(select(Region.country_code).where(
+                Region.country_code == region_id))).scalar_one_or_none()
+            if found is None:
+                raise ValidationFailed(f"region {region_id} 不存在",
+                                       code="fence_region_not_found")
 
     async def _check_geom(self, wkt: str) -> dict:
         try:

@@ -16,7 +16,8 @@ from sqlalchemy import func, select
 from src.kuma.core.db import dispose_engine, tx
 from src.kuma.core.security import hash_password
 from src.kuma.models.core import (
-    Account, Identity, Membership, Org, Region, Vehicle, VehicleCredential, VehicleType,
+    Account, Identity, Membership, Org, Region, SubscriptionPlan, Vehicle, VehicleCredential,
+    VehicleType,
 )
 from src.kuma.models.geo import Fence
 
@@ -89,12 +90,51 @@ async def seed(*, print_only: bool) -> None:
                                               password_hash=hash_password(secrets.token_urlsafe(16)),
                                               version=1, status="active"))
 
-        fence_count = (await session.execute(select(func.count()).select_from(Fence))).scalar_one()
-        if fence_count == 0:
+        # `org_id` 必须有：派单硬过滤与 `fence_exit` 都按 `org_id` 匹配围栏，
+        # 之前 seed 出来的"曼谷运营区"org_id 是 NULL → `inside_operating_area()`
+        # 永远匹配不到，围栏看着存在但从不生效（2026-10-22 实测）。
+        # 这里写成"缺就补"，老库跑一遍 seed 即自愈，不用单独补迁移。
+        operator = (await session.execute(
+            select(Org).where(Org.code == "OP-TH-001"))).scalar_one_or_none()
+        demo_fence = (await session.execute(
+            select(Fence).where(Fence.name == "曼谷运营区"))).scalars().first()
+        if demo_fence is None:
             session.add(Fence(
                 name="曼谷运营区", fence_type="operating_area", region_id="TH",
+                org_id=operator.id if operator else None,
                 geom="SRID=4326;POLYGON((100.3 13.6,100.8 13.6,100.8 13.95,100.3 13.95,100.3 13.6))",
             ))
+        elif demo_fence.org_id is None and operator is not None:
+            demo_fence.org_id = operator.id
+
+        # 订阅套餐：`core.subscription_plan` 之前是**空表**，
+        # 于是"创建订阅"根本没有可选套餐——订阅功能整条链路不可用（2026-10-22 实测）。
+        # 金额按 Task-DataBase.md §11 规则 3：整数最小货币单位（THB 萨当，×100）。
+        plan_count = (await session.execute(
+            select(func.count()).select_from(SubscriptionPlan))).scalar_one()
+        if plan_count == 0:
+            session.add_all([
+                SubscriptionPlan(code="TH-BASIC-M", region_id="TH", plan_type="basic",
+                                 name="基础服务（月）", price=9900, currency="THB",
+                                 duration_days=30, features={"remote_control": False},
+                                 version=1, status="active"),
+                SubscriptionPlan(code="TH-BASIC-Y", region_id="TH", plan_type="basic",
+                                 name="基础服务（年）", price=99000, currency="THB",
+                                 duration_days=365, features={"remote_control": False},
+                                 version=1, status="active"),
+                SubscriptionPlan(code="TH-VA-M", region_id="TH", plan_type="value_added",
+                                 name="增值服务（月）", price=19900, currency="THB",
+                                 duration_days=30,
+                                 features={"remote_control": True, "fence_alert": True,
+                                           "mileage_report": True},
+                                 version=1, status="active"),
+                SubscriptionPlan(code="TH-OPERATOR-M", region_id="TH", plan_type="operator",
+                                 name="运营商车队套餐（月）", price=29900, currency="THB",
+                                 duration_days=30,
+                                 features={"remote_control": True, "fence_alert": True,
+                                           "dispatch": True, "fleet_dashboard": True},
+                                 version=1, status="active"),
+            ])
         await session.flush()
 
         for username, identity, password in created:

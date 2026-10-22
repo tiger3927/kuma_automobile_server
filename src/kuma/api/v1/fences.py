@@ -20,8 +20,8 @@ svc = FenceService()
 async def list_fences(session: Db, principal: PrincipalDep, org_id: int | None = None,
                       region_id: str | None = None, fence_type: str | None = None,
                       status: str | None = None, limit: int = 50, offset: int = 0) -> dict:
-    return await svc.page(principal, org_id=org_id, region_id=region_id, fence_type=fence_type,
-                          status=status, limit=limit, offset=offset)
+    return await svc.page(principal, session=session, org_id=org_id, region_id=region_id,
+                          fence_type=fence_type, status=status, limit=limit, offset=offset)
 
 
 @router.post("")
@@ -32,7 +32,7 @@ async def create_fence(body: FenceIn, request: Request, session: Db,
 
 @router.get("/{fence_id}")
 async def fence_detail(fence_id: int, session: Db, principal: PrincipalDep) -> dict:
-    return await svc.detail(principal, fence_id)
+    return await svc.detail(principal, session, fence_id)
 
 
 @router.patch("/{fence_id}")
