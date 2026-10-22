@@ -31,7 +31,7 @@ class FenceService:
         # 非平台身份只能看自己可见 org 集合内的围栏（Principal 的字段是 `org_ids`，复数）
         org_ids: list[int] | None = None
         if not principal.is_platform:
-            org_ids = list(principal.org_ids or [])
+            org_ids = principal.org_ids()      # 是方法不是属性（scope.py:146）
             if not org_ids:
                 return {"items": []}
         return {"items": await self.repo.page(org_id=org_id, org_ids=org_ids,
@@ -42,7 +42,7 @@ class FenceService:
         row = await self.repo.get(fence_id)
         if row is None:
             raise NotFound("fence_not_found")
-        if not principal.is_platform and row["org_id"] not in (principal.org_ids or []):
+        if not principal.is_platform and row["org_id"] not in principal.org_ids():
             raise Forbidden("fence_out_of_scope")
         return row
 
