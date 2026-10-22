@@ -48,6 +48,10 @@ OUT=deploy/runtime.env
   echo "KUMA_MQTT_VHOST=/kuma"
   echo "KUMA_MQ_AUTH_TOKEN=${KUMA_MQ_AUTH_TOKEN}"
   echo "KUMA_JWT_SECRET=${KUMA_JWT_SECRET}"
+  # 地图 key（Debug.md 高德节）：此前白名单不透传，key 写进 .env 服务也读不到。
+  # 缺行不炸（road 口径 v1 不做，key 可以缺席），有值才写——空串写进去没有意义。
+  [ -n "${KUMA_AMAP_KEY:-}" ] && echo "KUMA_AMAP_KEY=${KUMA_AMAP_KEY}"
+  [ -n "${KUMA_GOOGLE_KEY:-}" ] && echo "KUMA_GOOGLE_KEY=${KUMA_GOOGLE_KEY}"
 } > "$OUT"
 chmod 600 "$OUT"
 echo "WROTE $OUT"
