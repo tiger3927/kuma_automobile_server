@@ -19,7 +19,7 @@ from ..core.scope import Principal
 from ..repositories.fence_repo import MAX_AREA_KM2, MIN_AREA_KM2, FenceRepo
 from ..schemas.ops import FenceIn, FencePatch
 
-MAX_BBOX = {"xmin": -180.0, "xmax": 180.0, "ymin": -90.0, "ymax": 90.0}
+
 
 
 class FenceService:
@@ -115,8 +115,11 @@ class FenceService:
         if area > MAX_AREA_KM2:
             raise ValidationFailed(f"面积 {area:.0f} km² 超过上限 {MAX_AREA_KM2:.0f}",
                                    code="fence_area_too_large")
-        for key, bound in MAX_BBOX.items():
-            value = geom[key]
-            if value is None or not bound - 0.0001 <= float(value) <= bound + 0.0001:
-                raise ValidationFailed(f"坐标越界（{key}={value}）", code="fence_out_of_bounds")
+        # bbox 判定是"落在经纬度范围内"，不是"每个分量都等于某个边界值"
+        # （第一版写成后者，导致任何合法围栏都被判越界——2026-10-22 实测抓到）。
+        xmin, xmax = float(geom["xmin"]), float(geom["xmax"])
+        ymin, ymax = float(geom["ymin"]), float(geom["ymax"])
+        if not (-180.0 <= xmin and xmax <= 180.0 and -90.0 <= ymin and ymax <= 90.0):
+            raise ValidationFailed(f"坐标越界（x=[{xmin},{xmax}] y=[{ymin},{ymax}]）",
+                                   code="fence_out_of_bounds")
         return geom
