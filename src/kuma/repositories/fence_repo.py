@@ -56,9 +56,9 @@ class FenceRepo:
                    "region_id": region_id, "wkt": wkt, "status": status,
                    "active_from": active_from, "active_to": active_to})).scalar_one()
 
-    async def page(self, *, org_id: int | None = None, region_id: str | None = None,
-                   fence_type: str | None = None, status: str | None = None,
-                   limit: int = 50, offset: int = 0) -> list[dict]:
+    async def page(self, *, org_id: int | None = None, org_ids: list[int] | None = None,
+                   region_id: str | None = None, fence_type: str | None = None,
+                   status: str | None = None, limit: int = 50, offset: int = 0) -> list[dict]:
         sql = """
             SELECT id, name, fence_type, org_id, region_id, status,
                    active_from, active_to, created_at,
@@ -70,6 +70,9 @@ class FenceRepo:
         if org_id is not None:
             sql += " AND org_id = :org_id"
             params["org_id"] = org_id
+        if org_ids:
+            sql += " AND org_id = ANY(:org_ids)"
+            params["org_ids"] = list(org_ids)
         if region_id:
             sql += " AND region_id = :region_id"
             params["region_id"] = region_id
@@ -111,7 +114,8 @@ class FenceRepo:
             return await self.get(fence_id)
         engine = get_engine()
         async with engine.begin() as conn:
+            # 列名来自固定白名单（不是用户输入），拼接安全
             row = (await conn.execute(text(
-                f"UPDATE geo.fence SET {', '.join(sets)} WHERE id = :id RETURNING id"  # noqa: S608
+                f"UPDATE geo.fence SET {', '.join(sets)} WHERE id = :id RETURNING id"
             ), params)).mappings().one_or_none()
         return await self.get(fence_id) if row else None

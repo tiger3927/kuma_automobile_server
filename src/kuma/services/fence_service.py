@@ -11,8 +11,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import write_audit
@@ -30,18 +28,21 @@ class FenceService:
     async def page(self, principal: Principal, *, org_id: int | None = None,
                    region_id: str | None = None, fence_type: str | None = None,
                    status: str | None = None, limit: int = 50, offset: int = 0) -> dict:
-        # 非平台身份只能看自己 org 的围栏
+        # 非平台身份只能看自己可见 org 集合内的围栏（Principal 的字段是 `org_ids`，复数）
+        org_ids: list[int] | None = None
         if not principal.is_platform:
-            org_id = principal.org_id
-        return {"items": await self.repo.page(org_id=org_id, region_id=region_id,
-                                              fence_type=fence_type, status=status,
-                                              limit=limit, offset=offset)}
+            org_ids = list(principal.org_ids or [])
+            if not org_ids:
+                return {"items": []}
+        return {"items": await self.repo.page(org_id=org_id, org_ids=org_ids,
+                                              region_id=region_id, fence_type=fence_type,
+                                              status=status, limit=limit, offset=offset)}
 
     async def detail(self, principal: Principal, fence_id: int) -> dict:
         row = await self.repo.get(fence_id)
         if row is None:
             raise NotFound("fence_not_found")
-        if not principal.is_platform and row["org_id"] != principal.org_id:
+        if not principal.is_platform and row["org_id"] not in (principal.org_ids or []):
             raise Forbidden("fence_out_of_scope")
         return row
 
