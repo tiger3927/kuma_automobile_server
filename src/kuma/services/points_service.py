@@ -83,22 +83,28 @@ class PointsService:
         }
 
     # ══ 消耗（与业务同事务）════════════════════════════════════════════════
-    async def spend(self, session: AsyncSession, principal: Principal, *, points: int,
+    async def spend(self, session: AsyncSession, *, account_id: int, points: int,
                     biz_line: str, amount: int, currency: str, region_id: str | None,
                     order_ref_type: str, order_ref_id: int, source_type: str, source_ref: str,
                     beneficiary_type: str, beneficiary_id: int,
                     memo: str | None = None) -> dict[str, Any]:
-        """扣积分 + 更新快照 + 按 `points_kind` 分记平台补贴。返回抵扣明细。
+        """扣**指定账户**的积分 + 更新快照 + 按 `points_kind` 分记平台补贴。
 
         `points == 0` 直接返回空明细（调用方不必自己加分支）。
+
+        **不收 principal、不查 `points:write`**（与 `refund` 同一立场，理由在这里更要命）：
+        积分属于**单据的持有人**，不属于按下按钮的人。换电是站点作业台提交的
+        （`swap:write` 只有 operator_staff 有），若按操作者判权限，
+        要么 operator 被 `points:write` 挡死（实测就是这个错），
+        要么更糟——按操作者取账户，把**员工的**积分抵给了用户的单，直接资损。
+        所以调用方必须显式传 `account_id`（换电取 `swap_order.account_id`，
+        车费取订单 rider），权限由业务动作本身判定（`swap:write` / `ride:write`）。
         """
         if points <= 0:
             return {"points": 0, "cash_value": 0, "split": [], "rule": None}
 
-        principal.require("points", "write")
-
         # ① 先锁账户（锁顺序：账户 → 批次，全项目统一，见 points_repo 文档）
-        acc = await self.repo.lock_account(session, principal.account_id)
+        acc = await self.repo.lock_account(session, account_id)
         if acc["frozen"]:
             raise InvalidState("积分已被冻结（对账或风控），暂不可抵扣", code="points_frozen")
 
@@ -119,7 +125,7 @@ class PointsService:
             raise ValidationFailed("订单金额低于抵扣门槛", code="offset_min_amount")
 
         # ③ 锁批次并按 expires_at 升序扣（§7.6 先扣快过期的）
-        batches = await self.repo.lock_batches(session, principal.account_id)
+        batches = await self.repo.lock_batches(session, account_id)
         owned = sum(int(b["remaining"]) for b in batches)
         if points > owned:
             raise InvalidState(f"积分不足：可用 {owned}，申请 {points}", code="points_insufficient")
@@ -143,12 +149,12 @@ class PointsService:
                 earned -= amt
             else:
                 purchased -= amt
-            await self.repo.insert_ledger(session, account_id=principal.account_id,
+            await self.repo.insert_ledger(session, account_id=account_id,
                                           points_kind=kind, delta=-amt,
                                           balance_after=earned if kind == "earned" else purchased,
                                           source_type=source_type, source_ref=source_ref,
                                           memo=memo)
-        await self.repo.set_balances(session, account_id=principal.account_id,
+        await self.repo.set_balances(session, account_id=account_id,
                                      earned=earned, purchased=purchased)
 
         # ⑤ 平台补贴按类分记（§10-14 + §7.5）。取整余数补给扣得最多的那类，

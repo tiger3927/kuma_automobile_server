@@ -205,7 +205,7 @@ class SwapService:
         # 免费重换 amount=0 → 上限算出来是 0，任何抵扣都会被 `offset_over_cap` 拒。
         if body.points_offset:
             order = await self._apply_points_offset(
-                session, principal, order=order, pricing=pricing, points=body.points_offset,
+                session, order=order, pricing=pricing, points=body.points_offset,
                 station=station, currency=price["currency"])
 
         # 免费重换要把**原单**扣过的积分退回（"免费"不能一边免钱一边留着上次的抵扣）。
@@ -287,17 +287,20 @@ class SwapService:
         return {"swap": order, "replayed": False}
 
     # ══ 积分抵扣（§16.9 / §7.3 / §10-14）════════════════════════════════════
-    async def _apply_points_offset(self, session: AsyncSession, principal: Principal, *,
-                                   order: dict, pricing: dict, points: int, station: dict,
-                                   currency: str) -> dict:
+    async def _apply_points_offset(self, session: AsyncSession, *, order: dict, pricing: dict,
+                                   points: int, station: dict, currency: str) -> dict:
         """扣积分 + 记平台补贴 + 把抵扣写回换电单（同事务）。
+
+        **扣的是 `swap_order.account_id` 的积分**——该 id 由协议持有人推导
+        （`_resolve_parties`），不是按按钮的站点员工。按操作者扣积分会出现
+        "员工的积分抵给了用户的单"这种资损，所以这里不接 principal。
 
         **`amount` 不动**：运营商按抵扣前金额收款（§10-14），站点作业台回填校验用
         `cash_amount`；差额已经由 `points_service.spend()` 按 `points_kind` 分记进
         `fin.subsidy_ledger`，所以这里只改 `cash_amount` / `points_offset` / `pricing` 快照。
         """
         plan = await self.points.spend(
-            session, principal, points=points, biz_line="swap",
+            session, account_id=order["account_id"], points=points, biz_line="swap",
             amount=int(order["amount"]), currency=currency, region_id=station["region_id"],
             order_ref_type="swap_order", order_ref_id=order["id"],
             source_type="swap_offset", source_ref=order["swap_no"],
