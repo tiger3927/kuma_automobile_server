@@ -8,6 +8,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.bus import get_bus
@@ -24,6 +25,7 @@ from ..core.logging import get_logger
 from ..core.pagination import PageParams
 from ..core.scope import Principal
 from ..models.biz import Command
+from ..models.core import Subscription
 from ..repositories.base import assert_vehicle_visible
 from ..repositories.command_repo import CommandRepo
 from ..repositories.state_repo import StateRepo
@@ -62,6 +64,16 @@ class CommandService:
         # 闸门 1：离线车直接拒绝，不排队堆积
         if not await self.state.is_online(vin):
             raise VehicleOffline("vehicle_offline")
+
+        # 闸门：订阅（C6）。口径——**订阅失效后收回控制能力**，但遥测入库与 WS 推送不受影响
+        # （订阅买的是服务，不是记录权；见 `tasks/sub_expiry.py` 的口径说明）。
+        # v1 过渡：从未订阅过的车不拦——seed 与在测车辆没有订阅记录，
+        # 直接拦会让 M7 下行链路无法验证；只有"有过订阅且全部失效"才拒。
+        sub_statuses = (await session.execute(
+            select(Subscription.status).where(Subscription.vin == vin)
+        )).scalars().all()
+        if sub_statuses and not any(s in ("active", "grace") for s in sub_statuses):
+            raise InvalidState("subscription_inactive")
 
         # 闸门 2：行车中禁断电
         live = await self.state.get(vin) or {}

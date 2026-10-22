@@ -98,6 +98,18 @@ async def activate_subscription(vin: str, body: SubscriptionIn, request: Request
     return {"id": sub.id, "vin": vin, "status": sub.status}
 
 
+@router.get("/{vin}/subscription")
+async def get_subscription(vin: str, session: Db, principal: PrincipalDep) -> dict:
+    """订阅历史与当前状态（C6：此前没有任何读取路径）。"""
+    return await svc.subscription_detail(session, principal, vin)
+
+
+@router.post("/{vin}/subscription/cancel")
+async def cancel_subscription(vin: str, request: Request, session: Db,
+                              principal: PrincipalDep) -> dict:
+    return await svc.cancel_subscription(session, principal, vin, ip=client_ip(request))
+
+
 @router.post("/{vin}/transfer")
 async def transfer(vin: str, body: TransferIn, request: Request, session: Db,
                    principal: PrincipalDep) -> dict:

@@ -43,7 +43,47 @@ class TelemetryService:
             })
         if stale:
             log.warn("telemetry.stale_dropped", count=stale)
+
+        await self._open_trips(kept)
         return stats
+
+    async def _open_trips(self, points: list[TelemetryPoint]) -> None:
+        """C0：行程生产者（口径见 `docs/mileage-spec.md`）。
+
+        每个 vin 只取本批**最早**的有效点——行程起点应当是最早那一报；
+        更晚才到的更早补报由 `recalc_mileage` 的幂等重算兜住。
+
+        放在落库之后：行程必须建立在已持久化的遥测上，否则 `trip_close`
+        可能关掉一段"库里根本没有点"的行程。
+        """
+        if not points:
+            return
+        from sqlalchemy import select
+
+        from ..core.db import tx
+        from ..models.core import Vehicle
+        from ..tasks.trip_splitter import open_trip_for_vin
+
+        earliest: dict[str, TelemetryPoint] = {}
+        for p in points:
+            cur = earliest.get(p.vin)
+            if cur is None or p.ts < cur.ts:
+                earliest[p.vin] = p
+
+        opened = 0
+        async with tx() as session:
+            vehicles = (await session.execute(
+                select(Vehicle).where(Vehicle.vin.in_(list(earliest)))
+            )).scalars().all()
+            by_vin = {v.vin: v for v in vehicles}
+            for vin, p in earliest.items():
+                vehicle = by_vin.get(vin)
+                if vehicle is None:
+                    continue                       # 未注册车辆（gateway 的 ACL 已挡，这里只是兜底）
+                _, created = await open_trip_for_vin(session, vehicle, ts=p.ts, odo_km=p.odo_km)
+                opened += int(created)
+        if opened:
+            log.info("trip.opened", count=opened, batch_vins=len(earliest))
 
     def _deadbanded(self, p: TelemetryPoint) -> bool:
         """静止且位移小于阈值 → 不落原始点（三轮车可减 60–80% 写入，§3-4）。

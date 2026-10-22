@@ -19,7 +19,15 @@ from src.kuma.core.db import dispose_engine, healthcheck
 from src.kuma.core.logging import setup_logging
 from src.kuma.core.redis_client import close as close_redis
 from src.kuma.core.redis_client import healthcheck as redis_health
-from src.kuma.tasks import Job, Scheduler, alarm_rules, offline_check, outbox, retention
+from src.kuma.tasks import (
+    Job,
+    Scheduler,
+    alarm_rules,
+    offline_check,
+    outbox,
+    retention,
+    sub_expiry,
+)
 
 settings = get_settings()
 settings.role = "worker"
@@ -54,6 +62,8 @@ JOBS.extend([
     # 静默到期回 open。缺了它，silenced 就成了永久屏蔽，
     # 而且同类抑制窗口会把后续告警全部吃掉（抑制条件包含 status='silenced'）。
     Job("alarm_snooze", alarm_rules.snooze_expiry, interval_s=120, lock_ttl=110),
+    # 订阅到期 / 自动续费 / 宽限期流转（口径见 tasks/sub_expiry.py 顶部决策）
+    Job("sub_expiry", sub_expiry.run, interval_s=3600, lock_ttl=3500),
     Job("outbox_publish", _outbox_publish, interval_s=5, lock_ttl=10),
     Job("retention", retention.ensure_partitions, interval_s=3600, lock_ttl=3500),
     Job("rep_refresh", retention.refresh_rep_views, interval_s=3600, lock_ttl=3500),

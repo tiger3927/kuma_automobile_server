@@ -47,8 +47,26 @@ class ReopenIn(BaseModel):
 
 
 class FenceIn(BaseModel):
-    name: str
-    fence_type: str
-    wkt_polygon: str = Field(description="SRID=4326 的 POLYGON WKT")
-    org_id: int | None = None
-    region_id: str | None = None
+    """围栏创建（C4）。几何用 **WKT POLYGON / SRID 4326**——
+    与 `geo/fence.py` 的 `ST_Contains(geom, point::geometry)` 判定口径一致。
+
+    `fence_type` 取值域：`operating_area`（获准经营区，派单硬过滤）|
+    `no_go`（禁行区）| `alert`（告警区）。写死在这三个，因为 worker 规则按它分流。
+    """
+
+    name: str = Field(min_length=2, max_length=120)
+    fence_type: str = Field(pattern="^(operating_area|no_go|alert)$")
+    wkt_polygon: str = Field(description="SRID=4326 的 POLYGON WKT，环必须闭合")
+    org_id: int | None = Field(default=None, description="归属运营商；operating_area 必填")
+    region_id: str | None = Field(default=None, description="两位国家码，对应 core.region")
+    status: str = Field(default="active", pattern="^(active|inactive|draft)$")
+    active_from: datetime | None = None
+    active_to: datetime | None = None
+
+
+class FencePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    status: str | None = Field(default=None, pattern="^(active|inactive|draft)$")
+    active_from: datetime | None = None
+    active_to: datetime | None = None
+

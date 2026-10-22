@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     # 60 是 10 倍余量；突发补报靠 dedup 与 backfill 窗口，不受这个限制影响正常流量。
     rate_limit_per_min: int = Field(60, alias="KUMA_RATE_LIMIT_PER_MIN")
 
+    # 行程切分（M5，口径见 `docs/mileage-spec.md`）：最后一报超过这个间隔就结束行程。
+    # 必须**晚于**离线判定（`state_ttl=90s`）——否则离线告警与行程结束会互相抢，
+    # 表现为"车刚被判离线，行程又被新到的补报点续上"。
+    trip_gap_s: int = Field(180, alias="KUMA_TRIP_GAP_S")
+
     # 告警（M5）：同类告警抑制窗口 + 默认静默时长。
     # 阈值本身（超速 km/h、急刹降幅）从硬编码常量迁到 `biz.alarm_rule` 表，见迁移 0006。
     alarm_dedupe_window_s: int = Field(600, alias="KUMA_ALARM_DEDUPE_WINDOW_S")

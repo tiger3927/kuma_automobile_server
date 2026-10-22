@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -197,14 +197,57 @@ class VehicleService:
             raise ValidationFailed("plan 与车辆地区不匹配")
 
         now = datetime.now(UTC)
+        # ⚠️ 此前这里写死 `end_at=None`，等于**订阅永不过期**——
+        # `auto_renew` / `end_at` 没有任何代码读，到期流转根本无从发生（C6 的根因）。
+        # 套餐的 duration_days 必须落到 end_at，续费与宽限期才有依据。
         sub = Subscription(vin=vin, plan_id=plan_id, status="active", start_at=now,
-                           end_at=None, auto_renew=True, payer_account_id=principal.account_id)
+                           end_at=now + timedelta(days=plan.duration_days),
+                           auto_renew=True, payer_account_id=principal.account_id)
         session.add(sub)
         await session.flush()
         await write_audit(session, actor=principal, action="subscription.activate",
                           resource_type="vehicle", resource_id=vin,
                           after={"plan_id": plan_id}, ip=ip)
         return sub
+
+    async def subscription_detail(self, session: AsyncSession, principal: Principal,
+                                  vin: str) -> dict:
+        """C6：此前订阅只有创建、没有任何读取路径（`auto_renew`/`end_at` 无人读）。"""
+        vehicle = await self.repo.get_by_vin(session, vin)
+        if vehicle is None:
+            raise NotFound("vehicle_not_found")
+        assert_vehicle_visible(principal, vehicle)
+        rows = (await session.execute(
+            select(Subscription, SubscriptionPlan)
+            .join(SubscriptionPlan, SubscriptionPlan.id == Subscription.plan_id)
+            .where(Subscription.vin == vin)
+            .order_by(Subscription.start_at.desc().nullslast()).limit(20)
+        )).all()
+        return {"vin": vin, "items": [
+            {"id": s.id, "status": s.status, "start_at": s.start_at, "end_at": s.end_at,
+             "auto_renew": s.auto_renew, "plan_id": s.plan_id,
+             "plan_code": p.code, "plan_type": p.plan_type,
+             "duration_days": p.duration_days} for s, p in rows]}
+
+    async def cancel_subscription(self, session: AsyncSession, principal: Principal, vin: str,
+                                  *, ip: str | None = None) -> dict:
+        """取消 = `cancelled` 终态 + 关自动续费。**不删行**：订阅是收入与结算凭据。"""
+        sub = await self.repo.active_subscription(session, vin)
+        if sub is None:
+            raise NotFound("subscription_not_found")
+        vehicle = await self.repo.get_by_vin(session, vin)
+        if vehicle is None:
+            raise NotFound("vehicle_not_found")
+        assert_vehicle_visible(principal, vehicle)
+        before = {"status": sub.status, "end_at": sub.end_at, "auto_renew": sub.auto_renew}
+        sub.status = "cancelled"
+        sub.auto_renew = False
+        await session.flush()
+        await write_audit(session, actor=principal, action="subscription.cancel",
+                          resource_type="vehicle", resource_id=vin,
+                          before=before, after={"status": "cancelled", "auto_renew": False},
+                          ip=ip)
+        return {"id": sub.id, "vin": vin, "status": sub.status}
 
     async def transfer_ownership(self, session: AsyncSession, principal: Principal, vin: str,
                                  *, to_type: str, to_account_id: int | None = None,

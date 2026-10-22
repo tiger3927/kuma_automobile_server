@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from ..core.config import get_settings
 from ..core.db import tx
 from ..core.logging import get_logger
 from ..models.biz import Trip
@@ -22,12 +23,12 @@ from ..services.trip_service import TripService
 
 log = get_logger("tasks.trip_splitter")
 
-GAP_S = 180
+GAP_S = 180      # 兜底值；实际取 `KUMA_TRIP_GAP_S`（口径见 docs/mileage-spec.md）
 
 
 async def close_idle_trips() -> None:
     """关闭"最后一报距今超过 gap_s"的 open trip。"""
-    cutoff = datetime.now(UTC) - timedelta(seconds=GAP_S)
+    cutoff = datetime.now(UTC) - timedelta(seconds=get_settings().trip_gap_s or GAP_S)
     async with tx() as session:
         rows = (await session.execute(
             select(Trip.id, Trip.vin)
@@ -57,12 +58,21 @@ async def close_idle_trips() -> None:
 
 
 async def open_trip_for_vin(session, vehicle: Vehicle, *, ts: datetime,
-                            odo_km: float | None) -> Trip:
-    """gateway/worker 在检测到新车首次上报时开行程（幂等：已有 open trip 直接返回）。"""
+                            odo_km: float | None) -> tuple[Trip, bool]:
+    """开一段行程，返回 `(trip, created)`。幂等：已有 active trip 就返回它 + False。
+
+    **这是全仓唯一写 `biz.trip` 的地方**（C0，2026-10-22 接进 `TelemetryService.ingest`）。
+    在此之前它零调用方，于是 `GET /trips`、`/gov/trips`、`recalc` 读到的全是 seed 数据，
+    `trip_close` 任务每 180s 扫一遍永远扫不到 `status='active'`——
+    而探针显示它"新鲜、零失败"，绿灯是假的。
+
+    `owner_*` 存的是**行程开始时刻的快照**：过户不追溯改变已有行程的归属（口径见
+    `docs/mileage-spec.md` §3）。
+    """
     repo = TripRepo()
     existing = await repo.open_trip(session, vehicle.vin)
     if existing:
-        return existing
+        return existing, False
     trip = Trip(
         vin=vehicle.vin, owner_type=vehicle.owner_type,
         owner_account_id=vehicle.owner_account_id, owner_org_id=vehicle.owner_org_id,
@@ -71,4 +81,4 @@ async def open_trip_for_vin(session, vehicle: Vehicle, *, ts: datetime,
     )
     session.add(trip)
     await session.flush()
-    return trip
+    return trip, True
