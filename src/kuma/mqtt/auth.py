@@ -24,6 +24,7 @@ MQTT topic → routing key 的映射：插件把 `/` 换成 `.`，所以 ACL 判
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Request
@@ -33,11 +34,15 @@ from starlette.requests import ClientDisconnect
 from ..core.config import get_settings
 from ..core.db import get_session_factory
 from ..core.logging import get_logger
+from ..core.redis_client import get_redis, kkey
 from ..core.security import averify_password
 from ..models.core import VehicleCredential
 
 log = get_logger("mqtt.auth")
 router = APIRouter(tags=["internal"])
+
+# 连接闸门拒绝总数（/metrics 暴露）。风暴时它是"设备侧退避有没有生效"的直接读数。
+connect_denied = 0
 
 # 车端只允许发这四类上行（`mqtt/topics.py`），且只能在自己的 VIN 前缀下
 PUBLISH_LEAVES = frozenset({"telemetry", "alarm", "cmd_ack", "heartbeat"})
@@ -129,11 +134,51 @@ async def verify_credential(username: str, password: str) -> bool:
     return await averify_password(password, cred.password_hash)
 
 
+async def _connect_gate(username: str) -> str | None:
+    """连接速率闸门（C9，2026-10-22 决策）：返回 None 放行，否则返回 deny 理由。
+
+    **为什么放在口令校验之前**：`verify_credential` 里是 argon2id 验证（几十毫秒 CPU），
+    连接风暴时先验口令等于让风暴直接打满 api 的 CPU——闸门必须先于昂贵操作。
+
+    **为什么服务端闸门 + 设备侧退避都要有**：网关重启后 100 台设备同时重连是必然事件，
+    服务端只靠"扛住"没有意义（RabbitMQ 没有连接速率配置项），必须让设备退避；
+    而设备退避的口径要靠服务端拒绝来反馈（MQTT 5 没有服务端退避指令，`deny` 是唯一手段）。
+
+    窗口用**分钟桶**而不是 TTL 计数：TTL 计数在 incr 与 expire 之间崩溃会留下无 TTL 的键，
+    把这台设备永久锁死；桶键天然过期，最坏只是多一个没人读的键。
+    """
+    s = get_settings()
+    r = get_redis()
+    bucket = int(datetime.now(UTC).timestamp() // 60)
+    key_vin = kkey("mqconn", username, str(bucket))
+    key_all = kkey("mqconn", "_all", str(bucket))
+    pipe = r.pipeline()
+    pipe.incr(key_vin)
+    pipe.incr(key_all)
+    pipe.expire(key_vin, 180)
+    pipe.expire(key_all, 180)
+    results = await pipe.execute()
+    per_vin, total = int(results[0]), int(results[1])
+    if per_vin > s.mq_connect_per_vin_per_min:
+        return "reconnect too fast"
+    if total > s.mq_connect_burst_per_min:
+        return "connect storm throttled"
+    return None
+
+
 @router.post("/user")
 @router.get("/user")
 async def user_route(request: Request) -> PlainTextResponse:
     p = await _params(request)
     username, password = p.get("username", ""), p.get("password", "")
+    reason = await _connect_gate(username)
+    if reason is not None:
+        global connect_denied
+        connect_denied += 1
+        if connect_denied % 20 == 1:      # 风暴时这条日志会炸，留痕本身也要限频
+            log.warn("mqtt.auth.throttled", username=username, reason=reason,
+                     total_denied=connect_denied)
+        return _deny(reason)
     if not await verify_credential(username, password):
         log.warn("mqtt.auth.denied", username=username, client_id=p.get("client_id", ""))
         return _deny("unknown user, revoked or bad password")
