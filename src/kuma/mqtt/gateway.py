@@ -14,8 +14,8 @@ from ..core.config import Settings
 from ..core.db import tx
 from ..core.logging import get_logger
 from ..core.redis_client import get_redis, set_ttl
-from ..repositories.alarm_repo import AlarmRepo
 from ..repositories.state_repo import StateRepo
+from ..services.alarm_service import raise_alarm
 from ..services.command_service import CommandService
 from .codecs import decode
 from .inbound import InboundPipeline
@@ -101,10 +101,14 @@ class MqttGateway:
             return
         if decoded.kind == "alarm" and decoded.alarm:
             async with tx() as session:
-                created = await AlarmRepo().raise_alarm(
+                created = await raise_alarm(
                     session, vin=vin, ts=decoded.ts or _now(), type_=decoded.alarm["type"],
                     level=decoded.alarm["level"], payload=decoded.alarm["payload"])
             if created:
+                # 两条路径各有用途，不是重复推送：
+                # ① 这里直推 Redis（毫秒级）——设备自己报的告警（碰撞、断电）必须立刻弹窗；
+                # ② outbox 的 `alarm.created`（worker 每 5s 投）——带 alarm id，给其它消费者
+                #    与前端列表刷新用。事件名不同（`alarm` vs `alarm.created`），前端不会混。
                 await _notify_alarm(vin, decoded.alarm)
             return
         if decoded.kind == "cmd_ack" and decoded.ack:
