@@ -72,7 +72,48 @@ class Org(Base):
     region_id: Mapped[str | None] = mapped_column(CHAR(2), ForeignKey("core.region.country_code"))
     primary_account_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("core.account.id"), unique=True)
+    # M15：集团聚合（兼容"多法人各持牌"）；NULL = 不属任何集团
+    group_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("core.org_group.id"))
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class OrgGroup(Base):
+    """集团（M15）：多条 org 挂同一集团，集团视图与报表有唯一来源。"""
+
+    __tablename__ = "org_group"
+    __table_args__ = {"schema": "core"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    country_code: Mapped[str | None] = mapped_column(CHAR(2))
+    tax_id_hash: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class OrgBusiness(Base):
+    """业务线 + 牌照（M15）：一家公司同时是经销商 / 网约车运营商 / 换电站运营商。
+
+    `org_type` 语义降级为**主业态**（CHECK 不动，向后兼容 M1–M2 已交付代码）；
+    scope 判定按业务线走 `Principal.org_ids_for_line()`，不再只看 `org_type`。
+    """
+
+    __tablename__ = "org_business"
+    __table_args__ = (
+        UniqueConstraint("org_id", "line"),
+        {"schema": "core"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    org_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("core.org.id"), nullable=False)
+    line: Mapped[str] = mapped_column(Text, nullable=False)
+    license_no: Mapped[str | None] = mapped_column(Text)
+    license_expiry: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
+    approved_by: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
@@ -236,6 +277,10 @@ class VehicleType(Base):
     features: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     protocol_profile: Mapped[str] = mapped_column(Text, nullable=False)
     regions: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    # M15 换电：与 `energy.battery_model.compatible_types` 构成**双向声明**，缺一即拒换电
+    swap_compatible: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    battery_model_code: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("energy.battery_model.model_code"))
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
 
 
@@ -254,6 +299,9 @@ class Vehicle(Base):
     color_code: Mapped[str | None] = mapped_column(Text)
     manufacture_date: Mapped[date | None] = mapped_column(Date)
     factory_code: Mapped[str | None] = mapped_column(Text)
+    # ⚠ M15：battery_sn 语义 = **出厂电池**（出厂追溯/质保），运行时"车上装哪块"以
+    #    core.vehicle_battery_binding 为准；其唯一索引 uq_vehicle_battery_sn 已在迁移 0007 撤销
+    #    （换电后一块电池先后属于多台车，SN 唯一性由 energy.battery 接管）
     battery_sn: Mapped[str | None] = mapped_column(Text)
     motor_sn: Mapped[str | None] = mapped_column(Text)
     battery_kwh_actual: Mapped[float | None] = mapped_column(Numeric(6, 2))
@@ -268,6 +316,29 @@ class Vehicle(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, default="produced")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class VehicleBatteryBinding(Base):
+    """运行时"这台车上装的是哪块电池"的**唯一来源**（M15 / `Task-Plan.md` §4.5）。
+
+    两条部分唯一索引在 DDL 里兜底（ORM 不声明 partial index）：
+    `uq_binding_active`(vin) 与 `uq_binding_battery_active`(battery_sn)，
+    `ended_at IS NULL` 即当前生效——换电时解绑旧行 + 插新行必须同事务。
+    """
+
+    __tablename__ = "vehicle_battery_binding"
+    __table_args__ = {"schema": "core"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    vin: Mapped[str] = mapped_column(CHAR(17), ForeignKey("core.vehicle.vin"), nullable=False)
+    battery_sn: Mapped[str] = mapped_column(
+        Text, ForeignKey("energy.battery.battery_sn"), nullable=False)
+    station_id: Mapped[int | None] = mapped_column(BigInteger)
+    swap_order_id: Mapped[int | None] = mapped_column(BigInteger)
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="swap")
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Device(Base):

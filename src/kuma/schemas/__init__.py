@@ -9,6 +9,21 @@ from .auth import (
     RegisterIn,
     SwitchIdentityIn,
 )
+from .energy import (
+    AllowedModelsIn,
+    BatteryIn,
+    BatteryModelIn,
+    BatteryStatusIn,
+    DepositRegisterIn,
+    DepositRuleIn,
+    LeaseIn,
+    LeaseTerminateIn,
+    NearbyQuery,
+    OrgBusinessIn,
+    StationIn,
+    SwapIn,
+    SwapPriceIn,
+)
 from .ops import AckIn, CommandIn, ConfirmIn, FenceIn, TrackQueryIn
 from .vehicle import (
     DeviceBindIn,
@@ -19,7 +34,10 @@ from .vehicle import (
 )
 
 __all__ = [
-    "AckIn", "CommandIn", "ConfirmIn", "DeviceBindIn", "FenceIn", "LoginIn", "MemberIn",
-    "OrgCreateIn", "PrimaryAdminTransferIn", "RefreshIn", "RegisterIn", "StatusChangeIn",
-    "SubscriptionIn", "SwitchIdentityIn", "TrackQueryIn", "TransferIn", "VehicleCreateIn",
+    "AckIn", "AllowedModelsIn", "BatteryIn", "BatteryModelIn", "BatteryStatusIn", "CommandIn",
+    "ConfirmIn", "DepositRegisterIn", "DepositRuleIn", "DeviceBindIn", "FenceIn", "LeaseIn",
+    "LeaseTerminateIn", "LoginIn", "MemberIn", "NearbyQuery", "OrgBusinessIn", "OrgCreateIn",
+    "PrimaryAdminTransferIn", "RefreshIn", "RegisterIn", "StationIn", "StatusChangeIn",
+    "SubscriptionIn", "SwapIn", "SwapPriceIn", "SwitchIdentityIn", "TrackQueryIn", "TransferIn",
+    "VehicleCreateIn",
 ]

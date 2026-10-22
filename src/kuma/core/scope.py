@@ -41,6 +41,13 @@ R_SETTLEMENT = "settlement"
 R_ORG = "org"
 R_REPORT = "report"
 R_AUDIT = "audit"
+# ── 换电与电池资产（M15，Task-Plan.md §10.1 换电六行）─────────────────────
+R_BATTERY_MODEL = "battery_model"   # 型号字典（型号→度数→单价，也是准入键）：平台录入与审核
+R_STATION = "station"               # 换电站主数据 + 准入型号白名单：运营商自有，改白名单写审计
+R_BATTERY = "battery"               # SN 级电池台账与流转流水：运营商自有池
+R_SWAP_LEASE = "swap_lease"         # 换电协议（押金是生效前置）
+R_SWAP = "swap"                     # 换电单（发起 + 站点作业台执行）
+R_DEPOSIT = "deposit"               # 押金规则与押金台账（负债，不是收入）
 
 _RW = {"read", "write"}
 _R = {"read"}
@@ -94,6 +101,19 @@ PERMISSIONS: dict[str, dict[IdentityType, set[str]]] = {
     R_REPORT: {"dealer_staff": _R, "manufacturer_staff": _R, "operator_staff": _R,
                "regulator": _R, "platform_staff": _RW},
     R_AUDIT: {"platform_staff": _R, "regulator": _R},
+    # ── 换电与电池资产（§10.1 换电六行；scope 见 repositories/base.py:station_scope）──
+    R_BATTERY_MODEL: {"platform_staff": _RW | {"review"}, "operator_staff": _R,
+                      "dealer_staff": _R, "regulator": _R},
+    R_STATION: {"operator_staff": _RW, "platform_staff": _R | {"review"}, "regulator": _R,
+                "consumer": _R, "owner": _R, "driver": _R},
+    R_BATTERY: {"operator_staff": _RW, "owner": _R, "driver": _R,
+                "platform_staff": _R | {"write"}, "regulator": _R},
+    R_SWAP_LEASE: {"consumer": _RW, "owner": _RW, "operator_staff": _RW,
+                   "platform_staff": _R | {"config"}, "regulator": _R},
+    R_SWAP: {"consumer": _RW, "owner": _RW, "driver": _RW, "operator_staff": _RW,
+             "platform_staff": _R | {"write"}, "regulator": _R},
+    R_DEPOSIT: {"consumer": _R, "owner": _R, "operator_staff": _RW,
+                "platform_staff": _R | {"review"}, "regulator": _R},
 }
 
 # 需要双人授权的高危动作（Task-Plan.md §9.5 / §10.1）
@@ -113,6 +133,9 @@ class OrgRef:
     role: str            # primary_admin | admin | agent | auditor
     level: int
     path: str
+    # M15：该 org 的**业务线**（core.org_business.line，active 行）。
+    # org_type 是单值"主业态"，多业态（同一家公司既做网约车又做换电）只能靠这里表达。
+    business_lines: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -146,6 +169,17 @@ class Principal:
     def org_ids(self, org_type: OrgType | None = None) -> list[int]:
         return [o.org_id for o in self.orgs if org_type is None or o.org_type == org_type]
 
+    def org_ids_for_line(self, line: str) -> list[int]:
+        """按**业务线**取 org（M15）。
+
+        与 `org_ids(org_type)` 的分工：后者按单值 `org_type`（主业态）过滤，是 M1–M2 的既有口径，
+        不动它以免波及车联网；换电侧必须按业务线判定——一家公司同时是网约车运营商和换电站运营商时，
+        `org_type` 只能记一个，按 org_type 过滤会漏（`Task-Server.md` §16 C12）。
+        业务线只在 `core.org_business` 有 active 行时出现，**没有隐式默认**：
+        没申报换电业务线的 org 拿不到换电 scope（牌照与业务线是线下准入的线上事实）。
+        """
+        return [o.org_id for o in self.orgs if line in o.business_lines]
+
     def is_primary_admin(self, org_id: int | None = None) -> bool:
         return any(o.role == "primary_admin" and (org_id is None or o.org_id == org_id)
                    for o in self.orgs)
@@ -170,7 +204,8 @@ class Principal:
             case "manufacturer_staff":
                 return "my_manufacturer"
             case "operator_staff":
-                return "my_operator"
+                # M15：有换电业务线时标签换成 my_station（换电侧的数据范围按站点收敛）
+                return "my_station" if self.org_ids_for_line("swap_operator") else "my_operator"
             case "driver":
                 return "self"
             case _:

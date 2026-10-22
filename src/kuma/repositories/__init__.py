@@ -2,15 +2,24 @@
 
 from .account_repo import AccountRepo
 from .alarm_repo import AlarmRepo
-from .base import assert_vehicle_visible, trip_scope_clause, vehicle_scope
+from .base import (
+    assert_station_visible,
+    assert_vehicle_visible,
+    station_scope,
+    swap_scope,
+    trip_scope_clause,
+    vehicle_scope,
+)
 from .command_repo import CommandRepo
+from .energy_repo import EnergyRepo
 from .stats_repo import StatsRepo
 from .telemetry_repo import FlushStats, TelemetryPoint, TelemetryRepo
 from .trip_repo import TripRepo
 from .vehicle_repo import VehicleRepo
 
 __all__ = [
-    "AccountRepo", "AlarmRepo", "CommandRepo", "FlushStats", "StatsRepo", "TelemetryPoint",
-    "TelemetryRepo", "TripRepo", "VehicleRepo", "assert_vehicle_visible", "trip_scope_clause",
-    "vehicle_scope",
+    "AccountRepo", "AlarmRepo", "CommandRepo", "EnergyRepo", "FlushStats", "StatsRepo",
+    "TelemetryPoint", "TelemetryRepo", "TripRepo", "VehicleRepo",
+    "assert_station_visible", "assert_vehicle_visible", "station_scope", "swap_scope",
+    "trip_scope_clause", "vehicle_scope",
 ]

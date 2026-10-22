@@ -7,6 +7,7 @@ from . import (
     audit,
     auth,
     commands,
+    energy,
     fences,
     fleet,
     gdpr,
@@ -32,5 +33,6 @@ api_router.include_router(alarms.router)
 api_router.include_router(commands.router)
 api_router.include_router(gov.router)
 api_router.include_router(audit.router)     # R_AUDIT 只读；查审计本身也写审计
+api_router.include_router(energy.router)    # 换电与电池资产（M15）：scope 按 swap_operator 业务线
 api_router.include_router(fences.router)    # 围栏：写操作只允许 platform
 api_router.include_router(ws.router)

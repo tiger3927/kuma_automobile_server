@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.core import Account, IdempotencyKey, Identity, Membership, Org
+from ..models.core import Account, IdempotencyKey, Identity, Membership, Org, OrgBusiness
 from .db import session_scope
 from .exceptions import Conflict, Forbidden, Unauthorized
 from .scope import IdentityType, OrgRef, OrgType, Principal
@@ -58,6 +58,18 @@ async def resolve_principal(session: AsyncSession, token: str) -> Principal:
                Org.status == "active")
     )).all()
 
+    # M15：业务线（core.org_business）——多业态 scope 的判定依据（换电按业务线，不按 org_type）。
+    # 一次查完按 org 分组；没有 active 行就是没有该业务线，不做隐式默认。
+    # ⚠ 依赖迁移 0007：core.org_business 不存在时这里会报错——**先跑迁移再部署代码**。
+    lines: dict[int, list[str]] = {}
+    org_ids = [o.id for _, o in rows]
+    if org_ids:
+        for org_id, line in (await session.execute(
+            select(OrgBusiness.org_id, OrgBusiness.line)
+            .where(OrgBusiness.org_id.in_(org_ids), OrgBusiness.status == "active")
+        )).all():
+            lines.setdefault(org_id, []).append(line)
+
     # 列在 DB 里是 text，取值域由 CHECK 约束保证（Task-DataBase.md §11）；
     # 这里 cast 成 Literal 只是把已保证的事实告诉类型系统，不是绕过校验
     return Principal(
@@ -66,7 +78,8 @@ async def resolve_principal(session: AsyncSession, token: str) -> Principal:
         active_identity=cast(IdentityType, active_id.identity_type),
         identities=sorted({i.identity_type for i in ids}),
         orgs=[OrgRef(org_id=o.id, org_type=cast(OrgType, o.org_type), role=m.role,
-                     level=o.level, path=o.path)
+                     level=o.level, path=o.path,
+                     business_lines=sorted(lines.get(o.id, [])))
               for m, o in rows],
         kyc_level=account.kyc_level,
         status=account.status,

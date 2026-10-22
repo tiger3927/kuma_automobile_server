@@ -6,6 +6,8 @@ Task-Plan.md §2.2 约束 2 / §10-8：所有列表查询必须经这里，api �
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import Select, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +15,7 @@ from ..core.exceptions import Forbidden
 from ..core.scope import Principal
 from ..models.biz import Trip
 from ..models.core import Vehicle
+from ..models.energy import Station, SwapOrder
 from ..models.mobility import FleetContract
 
 
@@ -67,6 +70,47 @@ def assert_vehicle_visible(principal: Principal, vehicle: Vehicle) -> None:
     if "operator_staff" in principal.identities and vehicle.owner_org_id in orgs:
         return
     raise Forbidden("vehicle_out_of_scope")
+
+
+def station_scope(principal: Principal) -> Select:
+    """换电站可见范围（M15）：按**业务线** `swap_operator` 判定，不看 `org_type`。
+
+    为什么不用 `org_ids("operator")`：一家公司可能既是网约车运营商又是换电站运营商，
+    `org_type` 单值记不下；反过来，只有 `org_type=operator` 但没申报换电业务线的组织
+    **拿不到换电 scope**（业务线与牌照是线下准入的线上事实，`Task-Plan.md` §16.10）。
+    """
+    stmt = select(Station.id)
+    if principal.is_platform or principal.is_regulator:
+        return stmt
+    orgs = principal.org_ids_for_line("swap_operator")
+    if not orgs:
+        return stmt.where(Station.id.is_(None))     # 恒假：不是"放行全表"
+    return stmt.where(Station.org_id.in_(orgs))
+
+
+def assert_station_visible(principal: Principal, station: Station) -> None:
+    """站点单对象读写归属（列表用 `station_scope`，单条用这里）。"""
+    if principal.is_platform or principal.is_regulator:
+        return
+    if station.org_id in principal.org_ids_for_line("swap_operator"):
+        return
+    raise Forbidden("station_out_of_scope")
+
+
+def swap_scope(principal: Principal) -> Select:
+    """换电单可见范围：运营商看本站本运营商，用户看自己发起的，平台/监管全量。"""
+    stmt = select(SwapOrder.id)
+    if principal.is_platform or principal.is_regulator:
+        return stmt
+    conds: list[Any] = []
+    orgs = principal.org_ids_for_line("swap_operator")
+    if orgs:
+        conds.append(SwapOrder.operator_org_id.in_(orgs))
+    if {"consumer", "owner", "driver"} & set(principal.identities):
+        conds.append(SwapOrder.account_id == principal.account_id)
+    if not conds:
+        return stmt.where(SwapOrder.id.is_(None))
+    return stmt.where(or_(*conds))
 
 
 def trip_scope_clause(principal: Principal):
