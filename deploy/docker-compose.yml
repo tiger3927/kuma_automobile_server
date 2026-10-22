@@ -1,7 +1,12 @@
 # kuma M0 中间件（爱商汇 38.47.109.16）
-# 依据：Task-Server.md §4.2/§4.3/§5、Task-DataBase.md §2
+# 依据：Task-Server.md §4.1/§4.2/§4.3/§5、Task-DataBase.md §2
 # 原则：全部绑 127.0.0.1（不对公网）；每个容器都有 mem_limit；口令在 .env（不入库）
 # 用法：cd /data/kuma_automobile_server/deploy && docker compose up -d
+#       （compose 自动读同目录的 .env 做变量展开，所以口令不用写在命令行里）
+#
+# 日志：三个容器都显式限死 json-file，**别依赖 daemon 默认**——本机 /etc/docker/daemon.json
+# 是空的 `{}`，默认驱动 json-file 且**无大小上限**，容器日志会一直涨到吃光磁盘
+# （2026-10-22 实测 journald 已占 2.1G，就是这个坑的另一半）。
 
 services:
   postgres:
@@ -20,6 +25,11 @@ services:
     shm_size: 64m
     mem_limit: 512m
     memswap_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     command: >
       postgres
       -c shared_buffers=128MB
@@ -60,8 +70,58 @@ services:
       - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
       - ./enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 20s
       timeout: 10s
+      retries: 5
+
+  redis:
+    # kuma 自己的 Redis（2026-10-22 起，Task-Server.md §4.1）。此前复用 orio-search-redis 的 DB5，
+    # 那个容器有两个致命事实：① `requirepass` 为空——本机任何进程可无口令读写**全部 db（含别人项目的 db0）**，
+    # 而 WS 推送走 redis pub/sub，等于绕过全部 API 鉴权给前端推假数据；
+    # ② 它有 256MiB cgroup 硬限但 Redis 自身 `maxmemory=0` + `noeviction` → 涨满会被 docker **直接杀掉**，连坐邻居项目。
+    # 起独立容器一次解决两件事，且不碰别人的容器。
+    image: redis:7-alpine
+    container_name: kuma-redis
+    restart: always
+    ports:
+      - "127.0.0.1:6380:6379"     # 6379 已被 orio 占用；6380 同样只绑回环
+    environment:
+      # 只为 healthcheck 能认证；口令本身由下面的 --requirepass 生效。
+      # 注意：口令会出现在 `docker inspect` 的 Env/Args 里——本机只有 root/tiger 能执行 docker，可接受。
+      KUMA_REDIS_PASSWORD: ${KUMA_REDIS_PASSWORD}
+    command:
+      - redis-server
+      - --requirepass
+      - ${KUMA_REDIS_PASSWORD}
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - allkeys-lru                # 到上限淘汰最久未用，而不是 noeviction 那样写失败
+      - --maxclients
+      - "200"
+      - --save
+      - ""                         # 关掉 RDB 快照
+      - --appendonly
+      - no                         # 也不开 AOF → **重启即清空、磁盘零增长**
+    # 为什么可以不要持久化：kuma 在 Redis 上只放缓存 / 车辆最新状态（TTL 90s）/ 任务锁 / pub-sub 广播，
+    # §4.1 明确"Redis 不承担可靠队列"——可靠的东西都在 PG 与 RabbitMQ（持久 + 死信）。
+    # 重启丢掉的只是在线状态与锁，下个上报周期自愈。
+    mem_limit: 192m
+    memswap_limit: 192m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$KUMA_REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 15s
+      timeout: 5s
       retries: 5

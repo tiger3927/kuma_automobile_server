@@ -20,6 +20,13 @@ if ! grep -q '^KUMA_MQ_AUTH_TOKEN=' deploy/.env; then
 fi
 set -a; . deploy/.env; set +a
 
+# kuma 独立 redis（2026-10-22，Task-Server.md §4.1）要求有口令：**缺就报错退出**，
+# 绝不退化成"无口令的 6379"——那正是这次要摆脱的配置。
+if [ -z "${KUMA_REDIS_PASSWORD:-}" ]; then
+  echo "!! deploy/.env 缺 KUMA_REDIS_PASSWORD。生成：head -c 24 /dev/urandom | base64 | tr -d '/+='" >&2
+  exit 1
+fi
+
 umask 077
 OUT=deploy/runtime.env
 {
@@ -27,7 +34,10 @@ OUT=deploy/runtime.env
   echo "KUMA_DSN=postgresql+asyncpg://kuma_app:${KUMA_APP_PASSWORD}@127.0.0.1:5432/kuma"
   echo "KUMA_MAINTENANCE_DSN=postgresql+asyncpg://kuma_owner:${KUMA_PG_OWNER_PASSWORD}@127.0.0.1:5432/kuma"
   echo "KUMA_MIGRATE_DSN=postgresql+asyncpg://kuma_owner:${KUMA_PG_OWNER_PASSWORD}@127.0.0.1:5432/kuma"
-  echo "KUMA_REDIS_URL=${KUMA_REDIS_URL:-redis://127.0.0.1:6379/5}"
+  # kuma 自己的 redis 容器：6380 + 口令 + db0。独立实例后不再需要 DB5 做隔离，
+  # 但 `kuma:` 前缀保留（它是"哪些 key 属于 kuma"的运维标识，也是 §4.1 的强制 TTL 约定载体）。
+  # ⚠️ 口令必须 URL 安全：生成方式已 `tr -d '/+='`，含 @ / : 会破坏这个 DSN。
+  echo "KUMA_REDIS_URL=redis://:${KUMA_REDIS_PASSWORD}@127.0.0.1:6380/0"
   echo "KUMA_AMQP_URL=amqp://kuma_mq:${KUMA_MQ_PASSWORD}@127.0.0.1:5672/%2Fkuma"
   echo "KUMA_MQTT_URL=mqtt://127.0.0.1:1883"
   # MQTT 用户名带 vhost 前缀：插件在 CONNECT 的 host 字段为空时默认落到 vhost '/'，

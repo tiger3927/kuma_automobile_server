@@ -38,8 +38,12 @@ class Settings(BaseSettings):
     max_overflow: int = Field(5, alias="KUMA_MAX_OVERFLOW")
     pool_timeout: int = Field(5, alias="KUMA_POOL_TIMEOUT")
 
-    # Redis（复用 orio-search-redis：DB5 + 前缀 + 强制 TTL）
-    redis_url: str = Field("redis://127.0.0.1:6379/5", alias="KUMA_REDIS_URL")
+    # Redis：kuma 自己的容器（127.0.0.1:6380，2026-10-22 起，§4.1）。
+    # 此前复用 orio-search-redis 的 DB5——那个容器 requirepass 为空（本机任意进程可读写全部 db），
+    # 且有 256MiB cgroup 硬限却 maxmemory=0 + noeviction（涨满被 docker 杀掉，连坐邻居项目）。
+    # 这里的默认值只给本机开发用（无口令）；生产由 deploy/runtime.env 注入带口令 URL，
+    # 且 scripts/gen_systemd_env.sh 缺 KUMA_REDIS_PASSWORD 会直接报错退出。
+    redis_url: str = Field("redis://127.0.0.1:6380/0", alias="KUMA_REDIS_URL")
     redis_prefix: str = Field("kuma:", alias="KUMA_REDIS_PREFIX")
     state_ttl: int = Field(90, alias="KUMA_STATE_TTL")
 
