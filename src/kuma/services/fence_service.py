@@ -18,7 +18,7 @@ from ..core.audit import write_audit
 from ..core.exceptions import Forbidden, NotFound, ValidationFailed
 from ..core.scope import Principal
 from ..models.core import Org, Region
-from ..repositories.fence_repo import MAX_AREA_KM2, MIN_AREA_KM2, FenceRepo
+from ..repositories.fence_repo import FenceRepo, MAX_AREA_KM2, MIN_AREA_KM2
 from ..schemas.ops import FenceIn, FencePatch
 
 
@@ -118,9 +118,9 @@ class FenceService:
             if found is None:
                 raise ValidationFailed(f"org {org_id} 不存在", code="fence_org_not_found")
         if region_id is not None:
-            found = (await session.execute(select(Region.country_code).where(
+            region_found = (await session.execute(select(Region.country_code).where(
                 Region.country_code == region_id))).scalar_one_or_none()
-            if found is None:
+            if region_found is None:
                 raise ValidationFailed(f"region {region_id} 不存在",
                                        code="fence_region_not_found")
 
@@ -146,7 +146,7 @@ class FenceService:
         # （第一版写成后者，导致任何合法围栏都被判越界——2026-10-22 实测抓到）。
         xmin, xmax = float(geom["xmin"]), float(geom["xmax"])
         ymin, ymax = float(geom["ymin"]), float(geom["ymax"])
-        if not (-180.0 <= xmin and xmax <= 180.0 and -90.0 <= ymin and ymax <= 90.0):
+        if not (xmin >= -180.0 and xmax <= 180.0 and ymin >= -90.0 and ymax <= 90.0):
             raise ValidationFailed(f"坐标越界（x=[{xmin},{xmax}] y=[{ymin},{ymax}]）",
                                    code="fence_out_of_bounds")
         return geom

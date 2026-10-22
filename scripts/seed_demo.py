@@ -31,6 +31,25 @@ DEMO_ACCOUNTS = [
     ("demo_dealer", "dealer_staff"), ("demo_operator", "operator_staff"),
     ("demo_regulator", "regulator"), ("demo_platform", "platform_staff"),
 ]
+# 订阅套餐（TH 首发）。price 用整数最小货币单位（萨当，×100）：9900 = ฿99.00。
+# `features` 是能力开关，不是文案——下行控制/围栏告警/派单这些闸门按它判定。
+DEMO_PLANS: list[dict] = [
+    dict(code="TH-BASIC-M", region_id="TH", plan_type="basic", name="基础服务（月）",
+         price=9900, currency="THB", duration_days=30,
+         features={"remote_control": False}, version=1, status="active"),
+    dict(code="TH-BASIC-Y", region_id="TH", plan_type="basic", name="基础服务（年）",
+         price=99000, currency="THB", duration_days=365,
+         features={"remote_control": False}, version=1, status="active"),
+    dict(code="TH-VA-M", region_id="TH", plan_type="value_added", name="增值服务（月）",
+         price=19900, currency="THB", duration_days=30,
+         features={"remote_control": True, "fence_alert": True, "mileage_report": True},
+         version=1, status="active"),
+    dict(code="TH-OPERATOR-M", region_id="TH", plan_type="operator", name="运营商车队套餐（月）",
+         price=29900, currency="THB", duration_days=30,
+         features={"remote_control": True, "fence_alert": True, "dispatch": True,
+                   "fleet_dashboard": True},
+         version=1, status="active"),
+]
 
 
 async def seed(*, print_only: bool) -> None:
@@ -110,31 +129,12 @@ async def seed(*, print_only: bool) -> None:
         # 订阅套餐：`core.subscription_plan` 之前是**空表**，
         # 于是"创建订阅"根本没有可选套餐——订阅功能整条链路不可用（2026-10-22 实测）。
         # 金额按 Task-DataBase.md §11 规则 3：整数最小货币单位（THB 萨当，×100）。
-        plan_count = (await session.execute(
-            select(func.count()).select_from(SubscriptionPlan))).scalar_one()
-        if plan_count == 0:
-            session.add_all([
-                SubscriptionPlan(code="TH-BASIC-M", region_id="TH", plan_type="basic",
-                                 name="基础服务（月）", price=9900, currency="THB",
-                                 duration_days=30, features={"remote_control": False},
-                                 version=1, status="active"),
-                SubscriptionPlan(code="TH-BASIC-Y", region_id="TH", plan_type="basic",
-                                 name="基础服务（年）", price=99000, currency="THB",
-                                 duration_days=365, features={"remote_control": False},
-                                 version=1, status="active"),
-                SubscriptionPlan(code="TH-VA-M", region_id="TH", plan_type="value_added",
-                                 name="增值服务（月）", price=19900, currency="THB",
-                                 duration_days=30,
-                                 features={"remote_control": True, "fence_alert": True,
-                                           "mileage_report": True},
-                                 version=1, status="active"),
-                SubscriptionPlan(code="TH-OPERATOR-M", region_id="TH", plan_type="operator",
-                                 name="运营商车队套餐（月）", price=29900, currency="THB",
-                                 duration_days=30,
-                                 features={"remote_control": True, "fence_alert": True,
-                                           "dispatch": True, "fleet_dashboard": True},
-                                 version=1, status="active"),
-            ])
+        # 按 code 逐条补，不看总数：库里可能已有别的来源的套餐（测试残留、人工配置）。
+        have = set((await session.execute(select(SubscriptionPlan.code))).scalars().all())
+        missing = [SubscriptionPlan(**kw) for kw in DEMO_PLANS if kw["code"] not in have]
+        if missing:
+            session.add_all(missing)
+            print(f"subscription_plan +{len(missing)}")
         await session.flush()
 
         for username, identity, password in created:
