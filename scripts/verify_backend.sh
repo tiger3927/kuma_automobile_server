@@ -10,6 +10,7 @@ export KUMA_DSN="postgresql+asyncpg://kuma_app:${KUMA_APP_PASSWORD}@127.0.0.1:54
 export KUMA_MIGRATE_DSN="postgresql+asyncpg://kuma_owner:${KUMA_PG_OWNER_PASSWORD}@127.0.0.1:5432/kuma"
 export KUMA_MAINTENANCE_DSN="$KUMA_MIGRATE_DSN"
 export KUMA_AMQP_URL="amqp://kuma_mq:${KUMA_MQ_PASSWORD}@127.0.0.1:5672/%2Fkuma"
+export KUMA_REDIS_URL="redis://:${KUMA_REDIS_PASSWORD}@127.0.0.1:6380/0"   # kuma-redis 独立容器（§4.1）
 export KUMA_MQTT_URL="mqtt://127.0.0.1:1883"
 export KUMA_MQTT_USER=kuma_mq
 export KUMA_MQTT_PASSWORD="${KUMA_MQ_PASSWORD}"
