@@ -138,14 +138,14 @@ async def fence_exit() -> None:
             live = await state.get(vin)
             if not live or live.get("lon") is None:
                 continue
-            if not await inside_operating_area(live["lon"], live["lat"], org_id):
-                if await repo.raise_alarm(
-                    session, vin=vin, ts=_now(), type_="fence_exit",
-                    level=int(_pick(rules, live.get("region"), "level") or 3),
-                    payload={"org_id": org_id, "lon": live["lon"], "lat": live["lat"]},
-                    dedupe_window_s=int(_pick(rules, live.get("region"), "dedupe_s") or 900),
-                ):
-                    hits += 1
+            outside = not await inside_operating_area(live["lon"], live["lat"], org_id)
+            if outside and await repo.raise_alarm(
+                session, vin=vin, ts=_now(), type_="fence_exit",
+                level=int(_pick(rules, live.get("region"), "level") or 3),
+                payload={"org_id": org_id, "lon": live["lon"], "lat": live["lat"]},
+                dedupe_window_s=int(_pick(rules, live.get("region"), "dedupe_s") or 900),
+            ):
+                hits += 1
     log.info("alarms.fence_exit", hits=hits)
 
 

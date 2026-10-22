@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.audit import write_audit
 from ..core.exceptions import ValidationFailed
 from ..core.pagination import PageParams
-from ..core.scope import Principal, R_AUDIT
+from ..core.scope import R_AUDIT, Principal
 from ..models.audit import AuditLog
 from ..repositories.audit_repo import AuditRepo
 from ..repositories.base import count_of

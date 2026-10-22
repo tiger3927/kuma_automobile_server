@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Select, exists, select, text, update
+from sqlalchemy import Select, literal, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from ..core.pagination import PageParams
@@ -27,8 +28,17 @@ class AlarmRepo:
         会刷出 30 条告警把运营淹没，也把 WS 推送刷爆。抑制窗口来自
         `biz.alarm_rule.dedupe_window_s`（2026-10-22 起，此前没有任何抑制）。
         """
-        stmt = pg_insert(Alarm).values(
-            vin=vin, ts=ts, type=type_, level=level, payload=payload or {}, status="open",
+        # 必须是 `INSERT ... SELECT ... WHERE NOT EXISTS`：PG 的 `INSERT ... VALUES` 
+        # **不支持 WHERE**（mypy 直接报 `"Insert" has no attribute "where"`），
+        # 而"先 SELECT 再 INSERT"会在并发下多写一条。from_select 一条语句搞定抑制。
+        cols = ["vin", "ts", "type", "level", "payload", "status"]
+        sel = select(
+            literal(vin).label("vin"),
+            literal(ts).label("ts"),
+            literal(type_).label("type"),
+            literal(level).label("level"),
+            literal(payload or {}, JSONB).label("payload"),
+            literal("open").label("status"),
         )
         if dedupe_window_s > 0:
             blocked = select(Alarm.id).where(
@@ -38,7 +48,8 @@ class AlarmRepo:
                 Alarm.ts >= ts - timedelta(seconds=dedupe_window_s),
                 Alarm.ts <= ts,
             ).exists()
-            stmt = stmt.where(~blocked)
+            sel = sel.where(~blocked)
+        stmt = pg_insert(Alarm).from_select(cols, sel)
         row = (await session.execute(
             stmt.on_conflict_do_nothing(index_elements=["vin", "ts", "type"]).returning(Alarm.id)
         )).first()
