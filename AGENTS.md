@@ -16,7 +16,17 @@
 
 ## tests 目录
 
-测试代码，临时代码，临时文件，临时数据，均放在tests目录！
+测试代码，临时代码，临时文件，临时数据，均放在tests目录！（该目录**不在 git 里**，见下节）
+
+## 版本与同步纪律（git，2026-10-19 定，硬约束）
+
+- **正式代码只走 git**：本机 `git commit` + `git push` → 服务器 `cd /data/kuma_automobile_server && git pull`（仓库公开，服务器无需凭据）。**禁止**再用 pscp 逐个文件覆盖正式代码（`src/`、`main.py` / `gateway.py` / `worker.py`、`migrations/`、`scripts/`、`deploy/` 配置、`pyproject.toml`、`AGENTS.md`、`README.md`）。
+- **把任何新文件加入 git、或从 git 删除文件，必须先经我同意**——包括 `git add` 新路径、`git rm` / `git mv`、以及改 `.gitignore` 让文件进入或脱离跟踪。**一次同意只对当次生效**，不许顺手扩大范围；已跟踪文件的普通内容修改不受此限。
+- **不在 git 里的东西**（别试图纳入，也别假设 `git clone` 能拿到）：`tests/`、`mock/`、`.codegraph/`、未跟踪的 md 开发笔记（`Task-Plan.md` / `Task-Server.md` / `Task-DataBase.md` / `Task-Web.md` / `History.md` / `Debug.md` / `CodeGraph使用.md` / `PowerShell_Fix.md`）、`codegraph.json`、凭据文件 `deploy/.env` 与 `deploy/runtime.env`。
+  其中 **md 开发笔记不必同步到服务器**——服务器只要代码，笔记在本机维护即可（省掉每次改文档都 pscp 一遍）；
+  **`tests/` 要服务器能跑测试**，改动后用 pscp 补到 `/data/kuma_automobile_server/tests/`。
+- **凭据防泄露**：`.gitignore` 的 `.env` 只匹配文件名正好叫 `.env`，**`deploy/runtime.env` 不在保护范围**，而这个仓库是公开的。服务器已在 `.git/info/exclude` 加了额外排除（只在本机生效、不会被 push）。**提交前先看 `git status`**，一旦出现 md / `.env` / `runtime.env` / `tests/` 路径，停手问我，不要提交。
+- 服务器实例已是 git 仓库（`HEAD` 与本机 `origin/main` 一致）。
 
 ## 调试与部署
 
@@ -30,6 +40,8 @@
 
 所需的PostgreSQL数据库/rabbitmq/redis，在服务器docker中
 
+备注：本机python，采用conda下的base环境，用于临时任务和代码编译检查
+
 ## 参考文档
 
 ### 规划与实现文档（动手前先查对应的那一份）
@@ -40,7 +52,7 @@
 | [Task-Server.md](Task-Server.md) | 后端进程拓扑（api / gateway / worker 三进程同一份代码）、§7 目录与依赖铁律、MQTT 公网接入与安全、下行控制、里程算法实现、异步规范、容量与内存预算、端口规划、conda `kuma`、里程碑 M0–M7 |
 | [Task-DataBase.md](Task-DataBase.md) | PostgreSQL 16 + PostGIS 3.5 镜像与扩展、容器运行、角色与最小权限、schema 与分区、备份恢复、连接池、§11 全量表设计（DDL 级）；`migrations/sql/*.sql` 以它为准 |
 | [Task-Web.md](Task-Web.md) | 前端实现计划：`web/` 三工程（`portal` 官网 / `guest` 用户端 / `admin` 管理端含 `/gov`），Vue3 + Vite + TS，**本机构建**（服务器无 node）产物落各 `dist/` 由 FastAPI 作静态资源对外访问；含技术栈定稿、挂载与缓存、前后端契约、分期 W0–W7 与验收 |
-| [Debug.md](Debug.md) | 调试与部署服务器（爱商汇）地址、账号与凭据、宝塔面板信息；**凭据只落这一份**，其它文档不写密码 |
+| [Debug.md](Debug.md) | 调试与部署服务器（爱商汇）地址、账号与凭据、宝塔面板信息,高德地图 key 及凭据、Google 地图 key（**目前是虚拟占位串，未申请**）；**凭据只落这一份**，其它文档不写密码。涉及地图 key / 服务器 / 数据库口令**先读这一份** |
 
 冲突裁决顺序（引自 `Task-Plan.md` §0）：容量与性能约束（`Task-Server.md` §3）> 安全约束（`Task-Server.md` §8/§9）> 口径定义（`Task-Plan.md` §8.6）> 功能优先级（`Task-Plan.md` §12）。与容量或安全约束冲突的功能让路，不改约束。
 
