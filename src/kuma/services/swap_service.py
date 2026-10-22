@@ -35,13 +35,16 @@ from ..models.core import Vehicle, VehicleType
 from ..repositories.base import assert_vehicle_visible
 from ..repositories.energy_repo import EnergyRepo
 from ..schemas.energy import SwapIn
+from .points_service import REFUND_VALIDITY_DAYS, PointsService
 
 RE_SWAP_WINDOW = timedelta(minutes=30)     # §16.5：换出电池 SOC 不达标 → 30 分钟内免费重换
-POINTS_OFFSET_MAX_RATIO = 0.20            # §16.9：积分抵扣上限 20%（由平台补贴）
+# 积分抵扣上限**不在代码里**：它是 `mkt.points_offset_rule.max_offset_pct`（§16.9 换电默认 20%，
+# 按地区/币种分档、版本化）。写死在这里就会出现"代码 20% / 规则表 30%"两个真相。
 
 
 class SwapService:
     repo = EnergyRepo()
+    points = PointsService()
 
     # ══ 换电执行 ═══════════════════════════════════════════════════════════
     async def execute(self, session: AsyncSession, principal: Principal, body: SwapIn, *,
@@ -148,12 +151,8 @@ class SwapService:
                                       body=body, reason="soc_below", ip=ip,
                                       idempotency_key=idempotency_key, lease=lease)
 
-        # 积分抵扣：mkt 积分域尚无 ORM 与账本写入方（Task-Server §16 C10），
-        # 这里**不做假抵扣**——真接上之前直接拒，避免"扣了积分但没记账"。
-        if body.points_offset:
-            raise ValidationFailed(
-                "积分抵扣换电暂未开放（积分账本未上线，见 Task-Server.md §16 C10）",
-                code="points_offset_unavailable")
+        # 积分抵扣（§16.9）在换电单落库**之后**处理——`fin.subsidy_ledger.order_ref_id`
+        # 要挂换电单 id，而抵扣的现金等值又要写回这张单。见下面 `_apply_points_offset`。
 
         # 30 分钟免费重换（§16.5）：原价 0，且把上次换出去的那块计一次质量投诉
         re_swap = None
@@ -200,6 +199,19 @@ class SwapService:
             "idempotency_key": idempotency_key, "status": "completed",
             "re_swap_of": body.re_swap_of,
         })
+
+        # 积分抵扣（§16.9）：扣积分 + 按 points_kind 分记平台补贴 + 写回本单。
+        # 与四写同事务——积分扣了但换电失败，或换电成功但积分没扣，都是账不平。
+        # 免费重换 amount=0 → 上限算出来是 0，任何抵扣都会被 `offset_over_cap` 拒。
+        if body.points_offset:
+            order = await self._apply_points_offset(
+                session, principal, order=order, pricing=pricing, points=body.points_offset,
+                station=station, currency=price["currency"])
+
+        # 免费重换要把**原单**扣过的积分退回（"免费"不能一边免钱一边留着上次的抵扣）。
+        # 退给原单的 account_id，不是操作者的——站点员工替用户重换时退错人就是资损。
+        if re_swap is not None and int(re_swap["points_offset"] or 0) > 0:
+            await self._refund_points_offset(session, origin=re_swap)
 
         # 写 1/2/3/4：解绑 + 绑定 + 两块电池状态与位置 + 库存
         try:
@@ -254,19 +266,67 @@ class SwapService:
                                               payload=payload,
                                               actor_account_id=principal.account_id)
 
+        # 审计与事件都带上"抵扣前金额 / 现金 / 抵扣点数"三件套：
+        # 运营商应收按 amount 算、用户实付是 cash_amount，事后对账只看这一个字段就够（§10-14）
         await write_audit(session, actor=principal, action="swap.execute",
                           resource_type="swap_order", resource_id=order["id"],
                           after={"swap_no": swap_no, "vin": body.vin, "station_id": station["id"],
                                  "out_battery_sn": body.out_battery_sn,
                                  "in_battery_sn": body.in_battery_sn,
-                                 "amount": amount, "currency": price["currency"]}, ip=ip)
+                                 "amount": amount, "cash_amount": order["cash_amount"],
+                                 "points_offset": order["points_offset"],
+                                 "currency": price["currency"]}, ip=ip)
         await emit(session, aggregate_type="swap_order", aggregate_id=order["id"],
                    event_type="completed",
                    payload={"swap_no": swap_no, "vin": body.vin,
                             "station_id": station["id"], "operator_org_id": station["org_id"],
                             "model_code": model["model_code"], "amount": amount,
+                            "cash_amount": order["cash_amount"],
+                            "points_offset": order["points_offset"],
                             "currency": price["currency"]})
         return {"swap": order, "replayed": False}
+
+    # ══ 积分抵扣（§16.9 / §7.3 / §10-14）════════════════════════════════════
+    async def _apply_points_offset(self, session: AsyncSession, principal: Principal, *,
+                                   order: dict, pricing: dict, points: int, station: dict,
+                                   currency: str) -> dict:
+        """扣积分 + 记平台补贴 + 把抵扣写回换电单（同事务）。
+
+        **`amount` 不动**：运营商按抵扣前金额收款（§10-14），站点作业台回填校验用
+        `cash_amount`；差额已经由 `points_service.spend()` 按 `points_kind` 分记进
+        `fin.subsidy_ledger`，所以这里只改 `cash_amount` / `points_offset` / `pricing` 快照。
+        """
+        plan = await self.points.spend(
+            session, principal, points=points, biz_line="swap",
+            amount=int(order["amount"]), currency=currency, region_id=station["region_id"],
+            order_ref_type="swap_order", order_ref_id=order["id"],
+            source_type="swap_offset", source_ref=order["swap_no"],
+            beneficiary_type="org", beneficiary_id=order["operator_org_id"],
+            memo=f"换电积分抵扣 {order['swap_no']}")
+        snap = dict(pricing)
+        snap.update({"points_offset": plan["points"], "offset_cash_value": plan["cash_value"],
+                     "offset_rule": plan["rule"], "offset_split": plan["split"]})
+        updated = await self.repo.apply_offset(
+            session, order["id"], points_offset=plan["points"],
+            cash_amount=int(order["amount"]) - int(plan["cash_value"]), pricing=snap)
+        if updated is None:
+            raise InvalidState("换电单抵扣写回失败", code="offset_apply_failed")
+        return updated
+
+    async def _refund_points_offset(self, session: AsyncSession, *, origin: dict) -> None:
+        """免费重换 → 退回原单扣过的积分（冲正，append-only）。
+
+        `source_ref` 用 `原单号:reswap`：与扣减的 `swap_offset/原单号` 不同键，
+        但同一原单重复重换只会退一次（撞 `uq_ledger_source` → `has_ledger` 预查直接返回）。
+        退回批次给 90 天有效期（§7.1 不得无限期），不复活原批次（可能已过期）。
+        """
+        split = {str(d["points_kind"]): int(d["points"])
+                 for d in (origin.get("pricing") or {}).get("offset_split", [])}
+        await self.points.refund(
+            session, account_id=origin["account_id"], points=int(origin["points_offset"]),
+            source_type="swap_offset_refund", source_ref=f"{origin['swap_no']}:reswap",
+            expires_at=datetime.now(UTC) + timedelta(days=REFUND_VALIDITY_DAYS),
+            kinds=split or None, memo=f"免费重换退回（原单 {origin['swap_no']}）")
 
     # ══ 查询 ═══════════════════════════════════════════════════════════════
     async def detail(self, session: AsyncSession, principal: Principal, swap_id: int) -> dict:

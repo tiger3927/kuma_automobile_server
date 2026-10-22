@@ -700,6 +700,21 @@ class EnergyRepo:
         await session.flush()
         return await self.find_swap(session, swap_id=swap_id)
 
+    async def apply_offset(self, session: AsyncSession, swap_id: int, *, points_offset: int,
+                           cash_amount: int, pricing: dict[str, Any]) -> dict[str, Any] | None:
+        """把积分抵扣写回换电单（`amount` 不变，只改 `cash_amount` 与 `points_offset`）。
+
+        **`amount` 必须保持抵扣前金额**——运营商按 `amount` 收款（§10-14），
+        `cash_amount` 是用户实际要付的差额，两者之差已由 `fin.subsidy_ledger` 记账。
+        `pricing` 里存规则快照（id/version/汇率/拆分明细），改规则不追溯历史单（§11.0-6）。
+        """
+        await session.execute(text(
+            "UPDATE energy.swap_order SET points_offset = :po, cash_amount = :ca, "
+            "pricing = :pricing WHERE id = :id"
+        ), {"po": points_offset, "ca": cash_amount, "pricing": _j(pricing), "id": swap_id})
+        await session.flush()
+        return await self.find_swap(session, swap_id=swap_id)
+
     async def list_swaps(self, session: AsyncSession, *, scope_subquery: Any,
                          status: str | None, station_id: int | None,
                          limit: int, offset: int) -> list[dict[str, Any]]:

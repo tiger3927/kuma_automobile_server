@@ -192,7 +192,10 @@ class SwapIn(BaseModel):
     vin: str = Field(min_length=8, max_length=17)
     out_battery_sn: str = Field(min_length=4, max_length=64, description="车上拆下来的旧电池")
     in_battery_sn: str = Field(min_length=4, max_length=64, description="换上去的满电电池")
-    points_offset: int = Field(default=0, ge=0, description="积分抵扣（上限 20%，由平台补贴）")
+    points_offset: int = Field(
+        default=0, ge=0,
+        description="抵扣的**积分点数**（不是钱）。现金等值按 mkt.points_offset_rule 换算，"
+                    "上限 = 本单金额 × max_offset_pct%（§16.9 换电默认 20%），差额由平台补贴")
     re_swap_of: int | None = Field(default=None, description="30 分钟内免费重换指向的原单 id")
     note: str | None = Field(default=None, max_length=300)
 

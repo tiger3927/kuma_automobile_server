@@ -25,6 +25,7 @@ from .energy import (
     SwapPriceIn,
 )
 from .ops import AckIn, CommandIn, ConfirmIn, FenceIn, TrackQueryIn
+from .points import OffsetApproveIn, OffsetCapacityIn, OffsetRuleIn
 from .vehicle import (
     DeviceBindIn,
     StatusChangeIn,
@@ -36,7 +37,8 @@ from .vehicle import (
 __all__ = [
     "AckIn", "AllowedModelsIn", "BatteryIn", "BatteryModelIn", "BatteryStatusIn", "CommandIn",
     "ConfirmIn", "DepositRegisterIn", "DepositRuleIn", "DeviceBindIn", "FenceIn", "LeaseIn",
-    "LeaseTerminateIn", "LoginIn", "MemberIn", "NearbyQuery", "OrgBusinessIn", "OrgCreateIn",
+    "LeaseTerminateIn", "LoginIn", "MemberIn", "NearbyQuery", "OffsetApproveIn",
+    "OffsetCapacityIn", "OffsetRuleIn", "OrgBusinessIn", "OrgCreateIn",
     "PrimaryAdminTransferIn", "RefreshIn", "RegisterIn", "StationIn", "StatusChangeIn",
     "SubscriptionIn", "SwapIn", "SwapPriceIn", "SwitchIdentityIn", "TrackQueryIn", "TransferIn",
     "VehicleCreateIn",

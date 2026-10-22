@@ -42,7 +42,19 @@ from .energy import (
     SwapOrder,
     SwapPrice,
 )
+from .fin import PointsLiability, SubsidyLedger
 from .geo import Fence
+
+# mkt 积分账本与抵扣规则（迁移 0006 建表 / 0008 补抵扣规则）
+from .mkt import (
+    PointsAccount,
+    PointsBatch,
+    PointsLedger,
+    PointsOffsetRule,
+    PointsPack,
+    PointsPurchase,
+    PointsRule,
+)
 from .mobility import (
     DispatchDecision,
     DispatchPolicy,
@@ -99,6 +111,15 @@ __all__ = [
     "OtpCode",
     "Outbox",
     "OwnershipTransfer",
+    # mkt 积分账本（0006）与抵扣规则（0008）
+    "PointsAccount",
+    "PointsBatch",
+    "PointsLedger",
+    "PointsLiability",
+    "PointsOffsetRule",
+    "PointsPack",
+    "PointsPurchase",
+    "PointsRule",
     "PoolStop",
     "RefreshToken",
     "Region",
@@ -112,6 +133,7 @@ __all__ = [
     "StationStock",
     "Subscription",
     "SubscriptionPlan",
+    "SubsidyLedger",
     "SwapEvent",
     "SwapOrder",
     "SwapPrice",
