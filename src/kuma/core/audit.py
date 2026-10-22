@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,11 +33,18 @@ async def write_audit(
         action=action,
         resource_type=resource_type,
         resource_id=str(resource_id) if resource_id is not None else None,
-        before=before,
-        after=after,
-        query=query,
+        # 三个 JSONB 列都过 _jsonable：调用方经常把 datetime / UUID 直接塞进 before/after
+        # （例如 `after={"snooze_until": <datetime>}`），不转换会在 commit 时炸。
+        before=_jsonable(before) if before is not None else None,
+        after=_jsonable(after) if after is not None else None,
+        query=_jsonable(query) if query is not None else None,
         ip=ip,
     ))
+    # **必须 flush**：审计与业务写同事务，若不立即写盘，序列化/约束异常会发生在
+    # FastAPI 依赖 teardown 的 commit 阶段——那时响应已经 200 发给客户端，
+    # 事务却整体回滚，业务写入静默丢失（2026-10-22 实测就是这个形态）。
+    # flush 让失败在响应发出之前抛出，客户端拿到 500 而不是假成功。
+    await session.flush()
 
 
 async def audit_regulator_query(
@@ -56,4 +65,8 @@ def _jsonable(obj: Any) -> Any:
         return [_jsonable(v) for v in obj]
     if isinstance(obj, (str, int, float, bool)) or obj is None:
         return obj
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
     return str(obj)

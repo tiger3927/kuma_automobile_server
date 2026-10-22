@@ -6,8 +6,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import date, datetime
+from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
@@ -25,6 +29,31 @@ log = get_logger("db")
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 _maint_engine: AsyncEngine | None = None
+
+
+def _json_default(o: object) -> object:
+    """JSONB 序列化的兜底转换。
+
+    **2026-10-22 实测踩到的坑（值得记住）**：`write_audit(after={"snooze_until": <datetime>})`
+    让 `json.dumps` 抛 `TypeError: Object of type datetime is not JSON serializable`。
+    因为审计写入没有 flush，异常发生在 FastAPI 依赖 teardown 的 `commit()` 阶段——
+    **响应已经 200 发给客户端，事务却整个回滚**，业务写入静默丢失。
+    审计是合规硬要求，这种"客户端以为成功、库里什么都没有"的失败方式最危险。
+
+    所以：① 这里把 datetime/date/Decimal/UUID/bytes 统一转成 JSON 可表达的形式；
+    ② `write_audit` 改为写入后立即 flush，让序列化问题在响应发出**之前**暴露。
+    """
+    if isinstance(o, datetime | date):
+        return o.isoformat()
+    if isinstance(o, Decimal):
+        return float(o)
+    if isinstance(o, UUID):
+        return str(o)
+    if isinstance(o, bytes | bytearray):
+        return o.decode("utf-8", "replace")
+    if isinstance(o, (set, frozenset, tuple)):
+        return list(o)
+    raise TypeError(f"JSONB 无法序列化 {type(o).__name__}")
 
 
 def _apply_session_config(dbapi_conn, _record, settings: Settings, app_suffix: str = "") -> None:
@@ -51,6 +80,9 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
         pool_timeout=s.pool_timeout,
         pool_pre_ping=True,
         future=True,
+        # 见 `_json_default` 的踩坑说明：所有 JSONB 列（audit.before/after/query、
+        # alarm.payload、command.payload…）都走这个序列化器。
+        json_serializer=lambda o: json.dumps(o, default=_json_default, ensure_ascii=False),
     )
     event.listen(_engine.sync_engine, "connect", lambda c, r: _apply_session_config(c, r, s))
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False, autoflush=False)
