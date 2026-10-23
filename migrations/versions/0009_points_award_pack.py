@@ -16,9 +16,10 @@
   没有"谁提的"，两个人签字就无从证明（0008 的抵扣规则表已有这一列，这里对齐）。
 - **`status` CHECK**：现列无取值域，`draft/pending_review/active/retired` 全靠代码自觉；
   与 `swap_price` / `deposit_rule` / `points_offset_rule` 同一模式。
-- **唯一约束改 `UNIQUE NULLS NOT DISTINCT (rule_code, region_id, currency, version)`**：
-  原约束是 PG 默认 UNIQUE，**NULL 互不相等** → 全区兜底行（`region_id IS NULL`）
-  可以被无限重复插入，"同一条规则有 5 个 active 版本"这种脏数据进得来（§11.0-6）。
+- **唯一键加 `currency`**：现库里的约束是 `uq_points_rule UNIQUE NULLS NOT DISTINCT
+  (rule_code, region_id, version)`——`NULLS NOT DISTINCT` 已经有了（兜底行不会被重复插），
+  但**键里没有币种**：加了 `currency` 列之后，"同一 rule_code 同一版本、THB 一行 ZAR 一行"
+  会被旧约束判为重复而插不进来。多币种必须换键（§11.0-6）。
 - **`idx_points_rule_active` 部分索引**：worker 每笔换电完成都要查一次生效规则
   （`source_type + region + currency + status='active'` + 日期窗），没索引就是全表扫。
 
@@ -75,8 +76,11 @@ def upgrade() -> None:
             CHECK (validity_months > 0),
           ADD COLUMN IF NOT EXISTS proposed_by bigint REFERENCES core.account
     """)
-    # 原 UNIQUE 视 NULL 互不相等 → 全区兜底行可重复插入（§11.0-6）
-    op.execute("ALTER TABLE mkt.points_rule DROP CONSTRAINT points_rule_rule_code_region_id_version_key")
+    # 唯一键要加 currency。实测现库的约束名是 `uq_points_rule`（不是 PG 默认名），
+    # 两个名字都 IF EXISTS 一遍：约束名不存在会让整个迁移事务回滚（第一次跑就是这么挂的）。
+    op.execute("ALTER TABLE mkt.points_rule "
+               "DROP CONSTRAINT IF EXISTS points_rule_rule_code_region_id_version_key")
+    op.execute("ALTER TABLE mkt.points_rule DROP CONSTRAINT IF EXISTS uq_points_rule")
     op.execute("""
         ALTER TABLE mkt.points_rule
           ADD CONSTRAINT uq_points_rule_version
@@ -124,10 +128,10 @@ def downgrade() -> None:
     op.execute("DROP INDEX IF EXISTS mkt.idx_points_rule_active")
     op.execute("ALTER TABLE mkt.points_rule DROP CONSTRAINT IF EXISTS points_rule_status_check")
     op.execute("ALTER TABLE mkt.points_rule DROP CONSTRAINT IF EXISTS uq_points_rule_version")
+    # 恢复成实测的原样（名字 + NULLS NOT DISTINCT），否则 downgrade 之后再 upgrade 会撞键名
     op.execute("""
         ALTER TABLE mkt.points_rule
-          ADD CONSTRAINT points_rule_rule_code_region_id_version_key
-          UNIQUE (rule_code, region_id, version)
+          ADD CONSTRAINT uq_points_rule UNIQUE NULLS NOT DISTINCT (rule_code, region_id, version)
     """)
     op.execute("ALTER TABLE mkt.points_rule DROP COLUMN IF EXISTS proposed_by, "
                "DROP COLUMN IF EXISTS validity_months, DROP COLUMN IF EXISTS currency")
