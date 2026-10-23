@@ -381,9 +381,10 @@ class PointsRepo:
         """写积分负债日快照（§7.5"卖出积分包收款 = 合同负债"）。
 
         **估值口径**：能追溯到 `points_purchase` 的批次按**购买单价**估
-        （`remaining × price / points`，这才是收进来的钱）；追溯不到的（如冲正新开批次）
-        该账号 `cash_equiv` 置 NULL 并留痕——**对不上就留空并告警，不编一个数**
-        （§7.6"不一致只告警不自动改账"的同一立场）。
+        （`remaining × amount / points`——`points_purchase` 的金额列叫 `amount`
+        不叫 `price`，写错就是 `column p.price does not exist`），这才是收进来的钱；
+        追溯不到的（如冲正新开批次）该账号 `cash_equiv` 置 NULL 并留痕——
+        **对不上就留空并告警，不编一个数**（§7.6"不一致只告警不自动改账"的同一立场）。
         """
         await session.execute(text("""
             INSERT INTO fin.points_liability (snapshot_date, account_id, booked_points,
@@ -399,7 +400,7 @@ class PointsRepo:
                 SELECT b.account_id,
                        SUM(b.remaining) AS pts,
                        COUNT(*) FILTER (WHERE p.id IS NULL) AS untraceable,
-                       SUM(ROUND(b.remaining::numeric * p.price / p.points))
+                       SUM(ROUND(b.remaining::numeric * p.amount / p.points))
                            FILTER (WHERE p.id IS NOT NULL) AS cash
                   FROM mkt.points_batch b
                   LEFT JOIN mkt.points_purchase p
