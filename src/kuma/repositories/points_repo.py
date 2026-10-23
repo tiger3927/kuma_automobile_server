@@ -356,17 +356,24 @@ class PointsRepo:
         """), {"lim": limit})).mappings().all()
         return [dict(r) for r in rows]
 
-    async def zero_batch(self, session: AsyncSession, batch_id: int) -> dict[str, Any] | None:
-        """把过期批次清零并返回**清零瞬间**的余额（`RETURNING remaining` 是旧值）。
+    async def zero_batch(self, session: AsyncSession, batch_id: int, *, expected: int
+                         ) -> dict[str, Any] | None:
+        """把过期批次清零。**金额由调用方从 `due_batches` 的读数提供**（`expected`）。
 
-        `expires_at <= now()` 再判一次：不写这个条件的话，并发下刚续期/刚修正过的批次
-        会被误清；清零瞬间的真实余额才是流水的 delta，不能拿查询时的旧读数记账。
+        为什么不在这里 `RETURNING remaining` 拿金额：PG 的 `UPDATE ... RETURNING`
+        返回的是**更新后**的值——`SET remaining = 0` 之后它只会给你 0，
+        于是过期流水记成 0、账户余额不减（集成测试就是这么抓到的）。
+
+        `remaining = :expected` 是并发防线：读数与清零之间该批次若被消耗/续期过，
+        这条 UPDATE 就匹配不到行、返回 None，调用方跳过（下一轮重新读），
+        而不是拿一个已经过期的数字去记账。调用方必须**先锁住该账户**
+        （`lock_account`），这样同一账户的批次变动不会插进来。
         """
         row = (await session.execute(text("""
             UPDATE mkt.points_batch SET remaining = 0
-             WHERE id = :id AND remaining > 0 AND expires_at <= now()
+             WHERE id = :id AND remaining = :expected AND expires_at <= now()
              RETURNING id, account_id, points_kind, remaining
-        """), {"id": batch_id})).mappings().one_or_none()
+        """), {"id": batch_id, "expected": expected})).mappings().one_or_none()
         await session.flush()
         return dict(row) if row else None
 

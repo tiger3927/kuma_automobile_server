@@ -503,10 +503,14 @@ class PointsService:
             if acc is None:
                 acc = await self.repo.lock_account(session, acc_id)
                 acc_cache[acc_id] = acc
-            zeroed = await self.repo.zero_batch(session, int(b["id"]))
+            # 金额取 `due_batches` 的读数（`zero_batch` 的 RETURNING 给的是清零后的 0）。
+            # 读数与清零之间该批次若被动过，`remaining = expected` 匹配不到 → 跳过，
+            # 下一轮重读；宁可这一轮少清一批，也不能记一笔对不上的过期流水。
+            zeroed = await self.repo.zero_batch(session, int(b["id"]),
+                                                expected=int(b["remaining"]))
             if zeroed is None:
-                continue                      # 并发下已被处理（或刚被续期），跳过
-            amount, kind = int(zeroed["remaining"]), str(zeroed["points_kind"])
+                continue                      # 并发下已被处理 / 刚被消耗或续期，跳过
+            amount, kind = int(b["remaining"]), str(zeroed["points_kind"])
             if kind == "earned":
                 acc["earned_balance"] = int(acc["earned_balance"]) - amount
             else:

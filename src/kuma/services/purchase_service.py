@@ -78,7 +78,7 @@ class PurchaseService:
             "region_id": ctx["region_id"], "currency": ctx["currency"],
             "purchase_enabled": bool(feats.get("points_pack_purchase", False)),
             "kyc_required": int(feats.get("kyc_level_for_points", 0)),
-            "kyc_level": principal.kyc_level,
+            "kyc_level": int(ctx.get("kyc_level") or 0),   # 库里为准，与闸门同一来源
             "limits": feats.get("points_pack_limits") or {},
             "items": await self.repo.packs(session, str(ctx["region_id"])),
         }
@@ -104,9 +104,12 @@ class PurchaseService:
             raise InvalidState(
                 f"{ctx['region_id']} 未开放积分包购买（§6.4：具单用途预付卡性质，"
                 "需当地备案/合规确认后才打开）", code="points_pack_disabled")
+        # **用库里的 kyc_level，不用 token 里的**：`Principal.kyc_level` 来自 JWT，
+        # 令牌签发后证件状态可能已变（补件/降级），拿它当闸门等于用旧快照放行。
         need_kyc = int(feats.get("kyc_level_for_points", 0))
-        if principal.kyc_level < need_kyc:
-            raise Forbidden(f"购买积分需 KYC 等级 ≥ {need_kyc}（当前 {principal.kyc_level}）",
+        have_kyc = int(ctx.get("kyc_level") or 0)
+        if have_kyc < need_kyc:
+            raise Forbidden(f"购买积分需 KYC 等级 ≥ {need_kyc}（当前 {have_kyc}）",
                             code="kyc_required")
 
         pack = await self.repo.pack_by_code(session, pack_code)
@@ -177,9 +180,10 @@ class PurchaseService:
             raise NotFound("支付单不存在", code="pay_order_not_found")
         if int(pay["account_id"]) != principal.account_id:
             raise Forbidden("只能给自己的订单回填凭证", code="not_your_pay_order")
-        if pay["pay_status"] not in OPEN_PAY_STATUSES:
-            raise InvalidState(f"支付单当前状态 {pay['pay_status']} 不能回填凭证",
-                               code="pay_state")
+        # `pay_order_by_no` 里支付单自己的状态键是 `status`（订单的才叫 `order_status`）；
+        # `voucher_by_id` 那边才把它 alias 成 `pay_status`——两处键名不同，写错就是 KeyError。
+        if pay["status"] not in OPEN_PAY_STATUSES:
+            raise InvalidState(f"支付单当前状态 {pay['status']} 不能回填凭证", code="pay_state")
         if pay["order_status"] != "created":
             raise InvalidState(f"订单当前状态 {pay['order_status']} 不能回填凭证",
                                code="order_state")
