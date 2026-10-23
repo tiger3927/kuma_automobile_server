@@ -204,7 +204,7 @@ class PurchaseRepo:
         """
         row = (await session.execute(text("""
             SELECT id, channel_code, provider_type, collect_mode, account_entity,
-                   config, config_version
+                   fee_rule, config_version
               FROM fin.payment_channel
              WHERE provider_type = :p AND status = 'on'
                AND regions @> CAST(:regions AS jsonb)

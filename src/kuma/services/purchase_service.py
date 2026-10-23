@@ -152,11 +152,17 @@ class PurchaseService:
                                  "pay_no": pay["pay_no"], "channel": channel["channel_code"]},
                           ip=ip)
         return {"order": order, "pay_order": pay, "replayed": False,
+                # 收款指引只给库里真有的字段。`payment_channel` 没有存账号/二维码的列
+                # （实测只有 `fee_rule` + `config_version`），二维码按房内惯例走
+                # `core.media`（owner_type='payment_channel'、owner_id=渠道 id）由运营上传，
+                # 前端取 media 即可——**不在这里编造一个 config 字段**。
                 "pay_instructions": {
                     "channel_code": channel["channel_code"],
                     "provider_type": channel["provider_type"],
                     "account_entity": channel["account_entity"],
-                    "config": channel.get("config") or {},
+                    "channel_id": int(channel["id"]),
+                    "config_version": channel.get("config_version"),
+                    "amount": int(pay["amount"]), "currency": pay["currency"],
                     "expires_at": pay["expires_at"],
                     "note": "转账后回填流水号，平台核销通过后积分即时入账"}}
 
