@@ -1,4 +1,8 @@
-"""积分消耗与退回（`Task-Plan.md` §7.3 / §7.4 / §7.5 / §16.9）。
+"""积分账本的业务层（`Task-Plan.md` §7.1–§7.6 / §16.9）。
+
+覆盖四件事：**消耗**（抵扣，与业务同事务）、**退回/冲正**（append-only）、
+**发放**（返积分与买包入账，`grant()`）、**规则配置**（抵扣规则 + 返积分规则，双人授权），
+外加两条日端口径：**过期清零**与**积分负债快照**（§7.6 / §7.5）。
 
 **为什么抵扣必须和业务写在同一个事务里**：换电那边"四写同事务"再加一笔——
 积分扣了但换电失败 = 用户白扣积分；换电成功但积分没扣 = 白送一次抵扣，
@@ -21,7 +25,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+import calendar
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,10 +36,28 @@ from ..core.audit import write_audit
 from ..core.exceptions import InvalidState, ValidationFailed
 from ..core.scope import Principal
 from ..repositories.points_repo import PointsRepo
+from .dual_control import require_co_approver
 
 KINDS = ("purchased", "earned")
 #: 退回积分时新批次的默认有效期（§7.1"不得无限期"；退回不该给用户更长的期限）
 REFUND_VALIDITY_DAYS = 90
+#: 返积分流水的来源值（与 `points_rule.source_type='swap'` 配对；
+#: 上限统计与补发 job 都按这个值找流水，改名等于把历史流水变成孤儿）
+AWARD_SOURCE_SWAP = "swap_award"
+EXPIRE_SOURCE = "points_expire"
+
+
+def add_months(moment: datetime, months: int) -> datetime:
+    """按**日历月**加期限（§7.1"赠送积分 12 个月"、§7.2"购买积分按包，默认 24 个月"）。
+
+    不用 `timedelta(days=months*30)`：那样 12 个月差 5 天，24 个月差 10 天，
+    而到期时间是给用户看、也要进负债表的硬日期。月末溢出按当月最后一天截断
+    （1/31 + 1 月 = 2/28，不是 3/3）。
+    """
+    year, month0 = divmod(moment.month - 1 + months, 12)
+    month = month0 + 1
+    day = min(moment.day, calendar.monthrange(moment.year + year, month)[1])
+    return moment.replace(year=moment.year + year, month=month, day=day)
 
 
 class PointsService:
@@ -274,10 +298,8 @@ class PointsService:
         if not principal.is_platform:
             raise InvalidState("抵扣规则只能由平台配置", code="rule_requires_platform")
         principal.require("points_rule", "write")
-        if principal.needs_dual_control("points_rule", "write") and co_approver_account_id is None:
-            raise InvalidState("改抵扣汇率需双人授权", code="dual_control_required")
-        if co_approver_account_id == principal.account_id:
-            raise ValidationFailed("联审人不能是本人", code="co_approver_is_actor")
+        if principal.needs_dual_control("points_rule", "write"):
+            await require_co_approver(session, principal, co_approver_account_id)
 
         rule = await self.repo.insert_offset_rule(
             session, rule_code=rule_code, biz_line=biz_line, region_id=region_id,
@@ -300,10 +322,10 @@ class PointsService:
         if not principal.is_platform:
             raise InvalidState("抵扣规则只能由平台审核", code="rule_requires_platform")
         principal.require("points_rule", "write")
-        if principal.needs_dual_control("points_rule", "write") and co_approver_account_id is None:
-            raise InvalidState("生效抵扣规则需双人授权", code="dual_control_required")
-        if co_approver_account_id == principal.account_id:
-            raise ValidationFailed("联审人不能是本人", code="co_approver_is_actor")
+        if principal.needs_dual_control("points_rule", "write"):
+            # 统一走 require_co_approver：只判"非本人"是假的二人——
+            # 传一个不存在的账号 id 也能过，审计里的"联审人"就成了空签字
+            await require_co_approver(session, principal, co_approver_account_id)
 
         rule = await self.repo.set_offset_rule_status(
             session, rule_id=rule_id, status="active" if approve else "draft",
@@ -316,3 +338,188 @@ class PointsService:
                           resource_type="points_offset_rule", resource_id=rule_id,
                           after={"status": rule["status"]}, ip=ip)
         return rule
+
+    # ══ 返积分（§7.2：换电按**实付现金** × 比例；抵扣部分不产生积分）════════════
+    async def award_for_swap(self, session: AsyncSession, *, swap_no: str) -> dict[str, Any]:
+        """一笔换电完成后返积分（worker 消费 `swap_order.completed` 调这里）。
+
+        **业务规则放在 services，不放 tasks**（`Task-Server.md` §7 依赖铁律：
+        tasks 全部走 services，不写业务规则副本）——补发 job 与消费方必须走同一条逻辑，
+        否则两条路径迟早算出两个数。
+
+        口径逐条对应 §7.2 换电行：
+        - 基数是 `cash_amount`（**实付现金**），不是 `amount`——
+          "抵扣部分不产生积分"，用 amount 就是积分生积分（套利的根）；
+        - 比例来自 `mkt.points_rule`（`source_type='swap'`，按 region + currency 匹配、版本化），
+          **代码里没有默认比例**：没有生效规则就是不发，并返回可观测的原因；
+        - `caps.per_order_max` / `per_day_max` 超限**整笔不发**（不是"发一部分"）：
+          上限是防刷，静默截断等于给刷单设了个收益率上限而不是拦住它；
+        - 幂等靠 `uq_ledger_source(source_type, source_ref, points_kind)`，
+          `source_ref = swap_no` → 事件重投、补发 job 重复扫都只发一次。
+        """
+        order = await self.repo.swap_for_award(session, swap_no)
+        if order is None:
+            return {"skipped": "swap_not_found", "swap_no": swap_no}
+        if order["status"] != "completed":
+            # 事件可能乱序或来自被拒单：状态以库里的单据为准，不信 payload
+            return {"skipped": f"status_{order['status']}", "swap_no": swap_no}
+        cash = int(order["cash_amount"])
+        if cash <= 0:
+            # 免费重换 / 全额抵扣 → 没有实付现金，不产生积分
+            return {"skipped": "no_cash_basis", "swap_no": swap_no}
+
+        rule = await self.repo.effective_award_rule(
+            session, source_type="swap", currency=str(order["currency"]),
+            region_id=order.get("region_id"))
+        if rule is None:
+            return {"skipped": "award_rule_missing", "swap_no": swap_no,
+                    "currency": order["currency"], "region_id": order.get("region_id")}
+
+        points = self._award_points(rule, cash)
+        if points <= 0:
+            return {"skipped": "rounds_to_zero", "swap_no": swap_no, "cash_amount": cash}
+
+        caps = rule.get("caps") or {}
+        per_order = caps.get("per_order_max")
+        if per_order is not None and points > int(per_order):
+            return {"skipped": "over_order_cap", "swap_no": swap_no, "points": points,
+                    "per_order_max": int(per_order)}
+        per_day = caps.get("per_day_max")
+        account_id = int(order["account_id"])
+        if per_day is not None:
+            midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+            got = await self.repo.awarded_since(session, account_id=account_id,
+                                                source_type=AWARD_SOURCE_SWAP, since=midnight)
+            if got + points > int(per_day):
+                return {"skipped": "over_daily_cap", "swap_no": swap_no, "points": points,
+                        "awarded_today": got, "per_day_max": int(per_day)}
+
+        expires_at = add_months(datetime.now(UTC), int(rule["validity_months"]))
+        out = await self.grant(session, account_id=account_id, points=points,
+                               points_kind="earned", source_type=AWARD_SOURCE_SWAP,
+                               source_ref=swap_no, expires_at=expires_at,
+                               memo=f"换电返积分（规则 {rule['rule_code']} v{rule['version']}）")
+        return {"granted": points, "replayed": out["replayed"], "swap_no": swap_no,
+                "account_id": account_id, "rule": rule["rule_code"],
+                "rule_version": rule["version"], "expires_at": expires_at.isoformat()}
+
+    @staticmethod
+    def _award_points(rule: dict[str, Any], cash_amount: int) -> int:
+        """按规则算返积分点数。
+
+        `ratio` 是"**每 1 最小货币单位**返多少积分"（金额列是最小单位，§3.2），
+        所以 THB 下"实付 1 泰铢返 1 积分" = `ratio = 0.01`。
+        用 Decimal 算并**向下取整**：float 乘出来的 34.999999 会变成 34 积分，
+        而多给一分积分就是白送钱（宁少发不多发，与抵扣侧同一立场）。
+        """
+        if rule.get("fixed_points") is not None:
+            return int(rule["fixed_points"])
+        if rule.get("ratio") is None:
+            return 0
+        return int(Decimal(str(cash_amount)) * Decimal(str(rule["ratio"])))
+
+    async def propose_award_rule(self, session: AsyncSession, principal: Principal, *,
+                                 rule_code: str, source_type: str, region_id: str | None,
+                                 currency: str | None, version: int, effective_from: date,
+                                 ratio: float | None = None, fixed_points: int | None = None,
+                                 type_code: str | None = None, caps: dict[str, Any]
+                                 | None = None, effective_to: date | None = None,
+                                 validity_months: int = 12,
+                                 co_approver_account_id: int | None = None,
+                                 ip: str | None = None) -> dict[str, Any]:
+        """申报返积分规则（§9.5 积分发放规则：平台 RW、**双人授权**）。
+
+        `ratio` 与 `fixed_points` 二选一：前者按实付现金比例（换电/商城/打车），
+        后者按单固定点数（买车按车型）。两个都给会无法判定优先级 → 直接拒。
+        """
+        if not principal.is_platform:
+            raise InvalidState("返积分规则只能由平台配置", code="rule_requires_platform")
+        principal.require("points_rule", "write")
+        if principal.needs_dual_control("points_rule", "write"):
+            await require_co_approver(session, principal, co_approver_account_id)
+        if (ratio is None) == (fixed_points is None):
+            raise ValidationFailed("ratio 与 fixed_points 必须且只能给一个",
+                                   code="award_rule_basis_ambiguous")
+        if ratio is not None and not 0 < float(ratio) < 100:
+            raise ValidationFailed("ratio 必须在 (0, 100) 之间（每最小货币单位返多少积分）",
+                                   code="award_ratio_out_of_range")
+        if validity_months <= 0:
+            raise ValidationFailed("validity_months 必须为正（§7.1 赠送积分 12 个月）",
+                                   code="award_validity_invalid")
+        if effective_to is not None and effective_to <= effective_from:
+            raise ValidationFailed("effective_to 必须晚于 effective_from", code="date_range")
+
+        rule = await self.repo.insert_award_rule(
+            session, rule_code=rule_code, source_type=source_type, region_id=region_id,
+            currency=currency, type_code=type_code, ratio=ratio, fixed_points=fixed_points,
+            caps=caps or {}, version=version, effective_from=effective_from,
+            effective_to=effective_to, validity_months=validity_months, status="pending_review",
+            proposed_by=principal.account_id)
+        await write_audit(session, actor=principal, action="points.award_rule.propose",
+                          resource_type="points_rule", resource_id=rule["id"],
+                          after={"rule_code": rule_code, "source_type": source_type,
+                                 "ratio": ratio, "fixed_points": fixed_points,
+                                 "version": version, "validity_months": validity_months,
+                                 "co_approver_account_id": co_approver_account_id}, ip=ip)
+        return rule
+
+    async def approve_award_rule(self, session: AsyncSession, principal: Principal, *,
+                                 rule_id: int, approve: bool,
+                                 co_approver_account_id: int | None = None,
+                                 ip: str | None = None) -> dict[str, Any]:
+        """审核返积分规则：通过后立即对所有后续换电生效，**不追溯已发的积分**（§7.2）。"""
+        if not principal.is_platform:
+            raise InvalidState("返积分规则只能由平台审核", code="rule_requires_platform")
+        principal.require("points_rule", "write")
+        if principal.needs_dual_control("points_rule", "write"):
+            await require_co_approver(session, principal, co_approver_account_id)
+
+        rule = await self.repo.set_award_rule_status(
+            session, rule_id=rule_id, status="active" if approve else "draft",
+            approver=principal.account_id)
+        if rule is None:
+            raise InvalidState("规则不存在", code="rule_not_found")
+        await write_audit(session, actor=principal,
+                          action="points.award_rule.approve" if approve
+                          else "points.award_rule.reject",
+                          resource_type="points_rule", resource_id=rule_id,
+                          after={"status": rule["status"]}, ip=ip)
+        return rule
+
+    # ══ 过期清零（§7.6：worker 每日扫 `expires_at` 生成过期流水）═══════════════
+    async def expire_batches(self, session: AsyncSession, *, limit: int = 500) -> dict[str, Any]:
+        """把过期批次清零并记负数流水——**不自动改账**之外的唯一自动动作就是这条，
+        因为它是规则本身（§7.1 期限），不是对账差异。
+
+        锁顺序仍是 **账户 → 批次**（`due_batches` 已按 account_id 升序返回，
+        全局顺序一致才不会和消耗路径死锁）。
+        """
+        due = await self.repo.due_batches(session, limit=limit)
+        acc_cache: dict[int, dict[str, Any]] = {}
+        done, total_points = 0, 0
+        for b in due:
+            acc_id = int(b["account_id"])
+            acc = acc_cache.get(acc_id)
+            if acc is None:
+                acc = await self.repo.lock_account(session, acc_id)
+                acc_cache[acc_id] = acc
+            zeroed = await self.repo.zero_batch(session, int(b["id"]))
+            if zeroed is None:
+                continue                      # 并发下已被处理（或刚被续期），跳过
+            amount, kind = int(zeroed["remaining"]), str(zeroed["points_kind"])
+            if kind == "earned":
+                acc["earned_balance"] = int(acc["earned_balance"]) - amount
+            else:
+                acc["purchased_balance"] = int(acc["purchased_balance"]) - amount
+            await self.repo.insert_ledger(
+                session, account_id=acc_id, points_kind=kind, delta=-amount,
+                balance_after=int(acc["earned_balance"] if kind == "earned"
+                                  else acc["purchased_balance"]),
+                source_type=EXPIRE_SOURCE, source_ref=f"batch:{b['id']}",
+                memo="积分到期（§7.1）")
+            await self.repo.set_balances(session, account_id=acc_id,
+                                         earned=int(acc["earned_balance"]),
+                                         purchased=int(acc["purchased_balance"]))
+            done += 1
+            total_points += amount
+        return {"batches": done, "points": total_points, "scanned": len(due)}

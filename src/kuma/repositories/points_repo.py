@@ -18,6 +18,7 @@ services 层的幂等检查只是让它变成可读的错误，不是正确性�
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from typing import Any
 
@@ -32,6 +33,10 @@ LEDGER_COLS = ("id, account_id, points_kind, delta, balance_after, source_type, 
 RULE_COLS = ("id, rule_code, biz_line, region_id, currency, points_per_unit, unit_scale, "
              "max_offset_pct, min_amount, version, effective_from, effective_to, status, "
              "proposed_by, approved_by")
+#: 返积分规则（`mkt.points_rule`，0006 建表 / 0009 补 currency + validity_months + proposed_by）
+AWARD_RULE_COLS = ("id, rule_code, source_type, region_id, currency, type_code, ratio, "
+                   "fixed_points, caps, version, effective_from, effective_to, status, "
+                   "proposed_by, approved_by, validity_months")
 
 
 class PointsRepo:
@@ -237,3 +242,180 @@ class PointsRepo:
              WHERE order_ref_type = :t AND order_ref_id = :id ORDER BY id
         """), {"t": order_ref_type, "id": order_ref_id})).mappings().all()
         return [dict(r) for r in rows]
+
+    # ══ 返积分规则（`mkt.points_rule`，版本化 + 双人授权）══════════════════════
+    async def effective_award_rule(self, session: AsyncSession, *, source_type: str,
+                                   currency: str, region_id: str | None) -> dict[str, Any] | None:
+        """生效的返积分规则：区域/币种精确行优先，NULL 兜底行其次，再按版本降序。
+
+        ⚠ `currency` 必须参与匹配：`ratio` 是"每 1 **最小货币单位**返多少积分"，
+        一条 `currency IS NULL` 的兜底规则套到另一种货币上会差一个数量级
+        （THB 最小单位 satang vs KRW 最小单位 won）。
+        """
+        rows = (await session.execute(text(f"""
+            SELECT {AWARD_RULE_COLS} FROM mkt.points_rule
+             WHERE source_type = :st AND status = 'active'
+               AND effective_from <= current_date
+               AND (effective_to IS NULL OR effective_to >= current_date)
+               AND (region_id IS NULL OR region_id = :region)
+               AND (currency IS NULL OR currency = :cur)
+             ORDER BY (region_id IS NULL), (currency IS NULL), version DESC
+             LIMIT 1
+        """), {"st": source_type, "region": region_id, "cur": currency})).mappings().all()
+        return dict(rows[0]) if rows else None
+
+    async def insert_award_rule(self, session: AsyncSession, *, rule_code: str,
+                                source_type: str, region_id: str | None, currency: str | None,
+                                type_code: str | None, ratio: float | None,
+                                fixed_points: int | None, caps: dict[str, Any], version: int,
+                                effective_from: date, effective_to: date | None,
+                                validity_months: int, status: str,
+                                proposed_by: int) -> dict[str, Any]:
+        # ⚠ jsonb 入参必须自己 `json.dumps`：`text()` 的绑定不带列类型，
+        #   asyncpg 收到 dict 直接 DataError（`CAST(:x AS jsonb)` 也救不了，编码在客户端就炸）
+        row = (await session.execute(text(f"""
+            INSERT INTO mkt.points_rule (rule_code, source_type, region_id, currency, type_code,
+                ratio, fixed_points, caps, version, effective_from, effective_to, status,
+                proposed_by, validity_months)
+            VALUES (:rule_code, :source_type, :region_id, :currency, :type_code,
+                    :ratio, :fixed_points, CAST(:caps AS jsonb), :version, :effective_from,
+                    :effective_to, :status, :proposed_by, :validity_months)
+            RETURNING {AWARD_RULE_COLS}
+        """), {"rule_code": rule_code, "source_type": source_type, "region_id": region_id,
+               "currency": currency, "type_code": type_code, "ratio": ratio,
+               "fixed_points": fixed_points, "caps": json.dumps(caps), "version": version,
+               "effective_from": effective_from, "effective_to": effective_to, "status": status,
+               "proposed_by": proposed_by, "validity_months": validity_months,
+               })).mappings().one()
+        await session.flush()
+        return dict(row)
+
+    async def set_award_rule_status(self, session: AsyncSession, *, rule_id: int, status: str,
+                                    approver: int) -> dict[str, Any] | None:
+        row = (await session.execute(text(
+            "UPDATE mkt.points_rule SET status = :s, approved_by = :by "
+            "WHERE id = :id RETURNING " + AWARD_RULE_COLS
+        ), {"s": status, "by": approver, "id": rule_id})).mappings().one_or_none()
+        await session.flush()
+        return dict(row) if row else None
+
+    async def awarded_since(self, session: AsyncSession, *, account_id: int, source_type: str,
+                            since: datetime) -> int:
+        """`since` 之后该账号从该来源**拿到**的积分（§7.2 日/月上限的口径）。
+
+        只算正数流水：冲正/过期是负数，不该给用户腾出额度（否则"发→撤→再发"可以刷上限）。
+        """
+        return int((await session.execute(text("""
+            SELECT COALESCE(SUM(delta), 0) FROM mkt.points_ledger
+             WHERE account_id = :a AND source_type = :st AND delta > 0 AND created_at >= :since
+        """), {"a": account_id, "st": source_type, "since": since})).scalar() or 0)
+
+    # ══ 返积分的取数（worker 消费方 / 补发 job）════════════════════════════════
+    async def swap_for_award(self, session: AsyncSession, swap_no: str) -> dict[str, Any] | None:
+        """按换电单号回查返积分所需字段（含站点区域，规则按区域匹配）。
+
+        **事件 payload 里没有 `account_id`**（`swap_service.py` 发的 payload 只有
+        swap_no / vin / station / amount / cash_amount / points_offset / currency），
+        而且事件可能重放或乱序——所以必须回查单据并校验状态，不能信 payload。
+        """
+        row = (await session.execute(text("""
+            SELECT o.id, o.swap_no, o.account_id, o.amount, o.cash_amount, o.points_offset,
+                   o.currency, o.status, o.model_code, o.completed_at, s.region_id
+              FROM energy.swap_order o
+              JOIN energy.station s ON s.id = o.station_id
+             WHERE o.swap_no = :no
+        """), {"no": swap_no})).mappings().one_or_none()
+        return dict(row) if row else None
+
+    async def swaps_pending_award(self, session: AsyncSession, *, source_type: str, days: int,
+                                  limit: int) -> list[str]:
+        """补发候选：已完成、有实付现金、但**没有对应返积分流水**的换电单。
+
+        这是"消费方 nack 后消息直接消失"的兜底（`core/bus.py` 的业务队列没有 DLX，
+        `nack(requeue=False)` 就是丢）。补发是幂等的：`grant()` 靠 `uq_ledger_source`。
+        """
+        rows = (await session.execute(text("""
+            SELECT o.swap_no FROM energy.swap_order o
+             WHERE o.status = 'completed' AND o.cash_amount > 0
+               AND o.created_at >= now() - make_interval(days => :d)
+               AND NOT EXISTS (SELECT 1 FROM mkt.points_ledger l
+                                WHERE l.source_type = :st AND l.source_ref = o.swap_no)
+             ORDER BY o.id LIMIT :lim
+        """), {"d": days, "st": source_type, "lim": limit})).scalars().all()
+        return list(rows)
+
+    # ══ 过期与负债快照（§7.6 / §7.5，worker 日终任务）══════════════════════════
+    async def due_batches(self, session: AsyncSession, *, limit: int) -> list[dict[str, Any]]:
+        """已过期但还有余额的批次。**按 account_id 升序**——调用方逐账号锁账户再处理批次，
+        全局锁顺序一致才不会死锁（与 `lock_batches` 同一课）。
+        """
+        rows = (await session.execute(text("""
+            SELECT id, account_id, points_kind, remaining, expires_at FROM mkt.points_batch
+             WHERE remaining > 0 AND expires_at <= now()
+             ORDER BY account_id, expires_at, id LIMIT :lim
+        """), {"lim": limit})).mappings().all()
+        return [dict(r) for r in rows]
+
+    async def zero_batch(self, session: AsyncSession, batch_id: int) -> dict[str, Any] | None:
+        """把过期批次清零并返回**清零瞬间**的余额（`RETURNING remaining` 是旧值）。
+
+        `expires_at <= now()` 再判一次：不写这个条件的话，并发下刚续期/刚修正过的批次
+        会被误清；清零瞬间的真实余额才是流水的 delta，不能拿查询时的旧读数记账。
+        """
+        row = (await session.execute(text("""
+            UPDATE mkt.points_batch SET remaining = 0
+             WHERE id = :id AND remaining > 0 AND expires_at <= now()
+             RETURNING id, account_id, points_kind, remaining
+        """), {"id": batch_id})).mappings().one_or_none()
+        await session.flush()
+        return dict(row) if row else None
+
+    async def snapshot_liability(self, session: AsyncSession, snapshot_date: date) -> int:
+        """写积分负债日快照（§7.5"卖出积分包收款 = 合同负债"）。
+
+        **估值口径**：能追溯到 `points_purchase` 的批次按**购买单价**估
+        （`remaining × price / points`，这才是收进来的钱）；追溯不到的（如冲正新开批次）
+        该账号 `cash_equiv` 置 NULL 并留痕——**对不上就留空并告警，不编一个数**
+        （§7.6"不一致只告警不自动改账"的同一立场）。
+        """
+        await session.execute(text("""
+            INSERT INTO fin.points_liability (snapshot_date, account_id, booked_points,
+                                              currency, cash_equiv)
+            WITH acc AS (
+                SELECT pa.account_id, COALESCE(r.currency, 'XXX') AS currency
+                  FROM mkt.points_account pa
+                  JOIN core.account a ON a.id = pa.account_id
+                  LEFT JOIN core.region r ON r.country_code = a.region_id
+                 WHERE pa.purchased_balance > 0
+            ),
+            val AS (
+                SELECT b.account_id,
+                       SUM(b.remaining) AS pts,
+                       COUNT(*) FILTER (WHERE p.id IS NULL) AS untraceable,
+                       SUM(ROUND(b.remaining::numeric * p.price / p.points))
+                           FILTER (WHERE p.id IS NOT NULL) AS cash
+                  FROM mkt.points_batch b
+                  LEFT JOIN mkt.points_purchase p
+                         ON p.purchase_no = b.source_ref AND p.status = 'completed'
+                 WHERE b.points_kind = 'purchased' AND b.remaining > 0 AND b.expires_at > now()
+                 GROUP BY b.account_id
+            )
+            SELECT :d, acc.account_id, val.pts, acc.currency,
+                   CASE WHEN val.untraceable = 0 THEN val.cash END
+              FROM acc JOIN val ON val.account_id = acc.account_id
+            ON CONFLICT (snapshot_date, account_id) DO UPDATE
+               SET booked_points = EXCLUDED.booked_points,
+                   cash_equiv    = EXCLUDED.cash_equiv
+        """), {"d": snapshot_date})
+        await session.flush()
+        return int((await session.execute(text(
+            "SELECT COUNT(*) FROM fin.points_liability WHERE snapshot_date = :d"
+        ), {"d": snapshot_date})).scalar() or 0)
+
+    async def liability_untraceable(self, session: AsyncSession,
+                                    snapshot_date: date) -> int:
+        """今天有多少账号的负债额**估不出来**（批次追溯不到购买单）→ job 里计数并告警。"""
+        return int((await session.execute(text("""
+            SELECT COUNT(*) FROM fin.points_liability
+             WHERE snapshot_date = :d AND cash_equiv IS NULL
+        """), {"d": snapshot_date})).scalar() or 0)

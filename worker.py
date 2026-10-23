@@ -25,6 +25,8 @@ from src.kuma.tasks import (
     alarm_rules,
     offline_check,
     outbox,
+    points_award,
+    points_lifecycle,
     retention,
     sub_expiry,
 )
@@ -51,6 +53,26 @@ async def _outbox_publish() -> None:
         print(f'{{"event":"outbox.published","count":{n}}}')
 
 
+async def _points_backfill() -> None:
+    """返积分补发（消息丢失的兜底）。有欠账就打一行，让 journalctl 能看见。"""
+    out = await points_award.backfill()
+    if out.get("pending"):
+        print(f'{{"event":"points_award.backfill","pending":{out["pending"]},'
+              f'"granted":{out.get("granted", 0)},"skipped":{out.get("skipped", 0)}}}')
+
+
+async def _points_expire() -> None:
+    await points_lifecycle.expire()
+
+
+async def _points_liability() -> None:
+    await points_lifecycle.liability_snapshot()
+
+
+async def _pay_timeout() -> None:
+    await points_lifecycle.pay_timeout()
+
+
 # 必须在上面的函数定义之后构建：JOBS 是模块级列表，导入时就求值，
 # 把函数写在后面会 NameError（ruff F821 抓到过这个）
 JOBS.extend([
@@ -67,6 +89,15 @@ JOBS.extend([
     Job("outbox_publish", _outbox_publish, interval_s=5, lock_ttl=10),
     Job("retention", retention.ensure_partitions, interval_s=3600, lock_ttl=3500),
     Job("rep_refresh", retention.refresh_rep_views, interval_s=3600, lock_ttl=3500),
+    # ── 积分与收款（§7.1 / §7.2 / §7.5 / §5.2）────────────────────────────────
+    # 补发不是"重试"：业务事件队列没有 DLX，nack 即丢（只有 kuma.cmd.down 配了死信），
+    # 所以返积分的可靠性靠这条 job，不靠 broker。
+    Job("points_award_backfill", _points_backfill, interval_s=300, lock_ttl=290),
+    Job("points_expire", _points_expire, interval_s=3600, lock_ttl=3500),
+    # 负债日快照一天一次（§7.5 财务口径）；重复跑覆盖同一天，可重入
+    Job("points_liability", _points_liability, interval_s=86_400, lock_ttl=86_000),
+    # 超时支付单不关，`uq_pay_active` 会让用户永远付不了第二次
+    Job("pay_timeout", _pay_timeout, interval_s=300, lock_ttl=290),
 ])
 
 
@@ -91,13 +122,19 @@ async def healthz() -> dict:
     mq = {"status": "ok"} if bus.is_connected() else {"status": "error"}
     sched = _SCHED.stats() if _SCHED is not None else {"status": "starting", "stale_jobs": []}
     unrouted = await bus.queue_depth(Q_EVENTS_UNROUTED) if bus.is_connected() else {"messages": -1, "consumers": -1}
+    # 返积分消费方的可见性：`consumers=0` = 消费方没起来（换电完成的事件会全量落到兜底队列，
+    # 靠 backfill job 补，但那是兜底不是常态）；`granted=0 且 skipped>0` = 平台没配返积分规则
+    points_q = (await bus.queue_depth(points_award.Q_EVENTS_POINTS) if bus.is_connected()
+                else {"messages": -1, "consumers": -1})
     ok = all(x["status"] == "ok" for x in (pg, redis, mq)) and sched["status"] == "ok"
     return {"status": "ok" if ok else "degraded", "role": settings.role,
             "pg": pg, "redis": redis, "mq": mq,
             "stale_jobs": sched["stale_jobs"],
             "jobs_total": len(JOBS),
             "events_alternate_exchange": bus.events_ae,
-            "events_unrouted": unrouted}
+            "events_unrouted": unrouted,
+            "points_award": points_award.counters(),
+            "points_award_queue": points_q}
 
 
 @app.get("/jobs")
@@ -111,6 +148,9 @@ async def jobs() -> dict:
 async def main() -> None:
     setup_logging(settings.role, json_logs=settings.is_prod)
     await get_bus().connect()          # outbox 要发事件
+    # 换电返积分消费方（§7.2）。必须在 connect 之后、调度循环之前：
+    # `consume_events` 先绑定再消费，晚起一秒就会让那一段事件走兜底队列。
+    await points_award.start()
 
     server = uvicorn.Server(uvicorn.Config(
         app, host="127.0.0.1", port=settings.worker_health_port, log_config=None,

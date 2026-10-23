@@ -7,6 +7,7 @@ from .command_service import CommandService, issue_confirm
 from .lease_service import LeaseService
 from .org_service import OrgService
 from .points_service import PointsService
+from .purchase_service import PurchaseService
 from .station_service import StationService
 from .swap_service import SwapService
 from .telemetry_service import TelemetryService
@@ -22,6 +23,7 @@ __all__ = [
     "LeaseService",
     "OrgService",
     "PointsService",
+    "PurchaseService",
     "StationService",
     "SwapService",
     "TelemetryService",

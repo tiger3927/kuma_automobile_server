@@ -13,6 +13,7 @@ from .base import (
 from .command_repo import CommandRepo
 from .energy_repo import EnergyRepo
 from .points_repo import PointsRepo
+from .purchase_repo import PurchaseRepo
 from .stats_repo import StatsRepo
 from .telemetry_repo import FlushStats, TelemetryPoint, TelemetryRepo
 from .trip_repo import TripRepo
@@ -20,7 +21,7 @@ from .vehicle_repo import VehicleRepo
 
 __all__ = [
     "AccountRepo", "AlarmRepo", "CommandRepo", "EnergyRepo", "FlushStats", "PointsRepo",
-    "StatsRepo",
+    "PurchaseRepo", "StatsRepo",
     "TelemetryPoint", "TelemetryRepo", "TripRepo", "VehicleRepo",
     "assert_station_visible", "assert_vehicle_visible", "station_scope", "swap_scope",
     "trip_scope_clause", "vehicle_scope",

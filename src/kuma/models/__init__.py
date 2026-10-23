@@ -3,6 +3,9 @@
 from .audit import AuditLog, Outbox
 from .base import Base, Geometry
 from .biz import Alarm, AlarmAck, Command, CommandAudit, Trip, TripMileage
+
+# commerce 只映射积分包购买链路要用的五张（004 建表；§5.1"积分包是商品"）
+from .commerce import Fulfillment, Order, OrderItem, PaymentChannel, Product, Sku
 from .core import (
     Account,
     DealerProfile,
@@ -42,7 +45,9 @@ from .energy import (
     SwapOrder,
     SwapPrice,
 )
-from .fin import PointsLiability, SubsidyLedger
+
+# fin：抵扣补贴 + 积分负债 + 收款线（pay_order / voucher / refund）
+from .fin import PaymentVoucher, PayOrder, PointsLiability, Refund, SubsidyLedger
 from .geo import Fence
 
 # mkt 积分账本与抵扣规则（迁移 0006 建表 / 0008 补抵扣规则）
@@ -96,6 +101,7 @@ __all__ = [
     "DriverProfile",
     "Fence",
     "FleetContract",
+    "Fulfillment",
     "Geometry",
     "IdempotencyKey",
     "Identity",
@@ -104,6 +110,8 @@ __all__ = [
     "Membership",
     "OperatorBinding",
     "OperatorProfile",
+    "Order",
+    "OrderItem",
     "Org",
     # core 多业态与电池绑定（M15）
     "OrgBusiness",
@@ -111,6 +119,10 @@ __all__ = [
     "OtpCode",
     "Outbox",
     "OwnershipTransfer",
+    # 收款线（005）：支付单 / 转账凭证 / 退款
+    "PayOrder",
+    "PaymentChannel",
+    "PaymentVoucher",
     # mkt 积分账本（0006）与抵扣规则（0008）
     "PointsAccount",
     "PointsBatch",
@@ -121,7 +133,9 @@ __all__ = [
     "PointsPurchase",
     "PointsRule",
     "PoolStop",
+    "Product",
     "RefreshToken",
+    "Refund",
     "Region",
     "RideEvent",
     "RideOffer",
@@ -129,6 +143,7 @@ __all__ = [
     "RidePool",
     "RideRating",
     "Sim",
+    "Sku",
     "Station",
     "StationStock",
     "Subscription",
