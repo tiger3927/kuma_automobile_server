@@ -23,15 +23,22 @@ from ..models.core import Identity
 async def require_co_approver(session: AsyncSession, principal: Principal,
                               co_approver_account_id: int | None, *,
                               role: str = "platform_staff") -> None:
-    """校验联审人：必须给、不能是本人、且真的有 `role` 的 active 身份。"""
+    """校验联审人：必须给、不能是本人、且真的有 `role` 的 active 身份。
+
+    ⚠ **`code=` 必须显式给**：`KumaError.__init__(message, *, code=...)` 里第一个参数是
+    给人看的文案，`code` 才是前端按 locale 映射的机器码（`core/exceptions.py:1` 的口径）。
+    老代码写成 `Forbidden("dual_control_required")` 会让响应里 `code="forbidden"`、
+    把真正的错误码塞进 message —— 前端拿不到可判别的 code，测试也只能断言到 `forbidden`。
+    """
     if co_approver_account_id is None:
-        raise Forbidden("dual_control_required")
+        raise Forbidden("该操作需双人授权，必须提供联审人", code="dual_control_required")
     if co_approver_account_id == principal.account_id:
-        raise Forbidden("co_approver_must_differ")
+        raise Forbidden("联审人不能是本人", code="co_approver_must_differ")
     ok = (await session.execute(
         Identity.__table__.select().where(
             Identity.account_id == co_approver_account_id,
             Identity.identity_type == role, Identity.status == "active")
     )).first()
     if ok is None:
-        raise Forbidden(f"co_approver_not_{role}")
+        raise Forbidden(f"联审人 {co_approver_account_id} 没有有效的 {role} 身份",
+                        code=f"co_approver_not_{role}")
