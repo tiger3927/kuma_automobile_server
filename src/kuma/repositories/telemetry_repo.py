@@ -120,9 +120,14 @@ class TelemetryRepo:
         return dict(row) if row else None
 
     async def refresh_hourly(self) -> None:
-        # REFRESH 只有物化视图 owner 能干（PG 没有 GRANT REFRESH）→ 走维护通道
+        # REFRESH 只有物化视图 owner 能干（PG 没有 GRANT REFRESH）→ 走维护通道。
+        # **必须 `engine.begin()`，不能 `engine.connect()`**：SQLAlchemy 2.0 的隐式事务
+        # 在连接关闭时回滚未提交内容，REFRESH 会被整个撤销，而日志照样打
+        # `hourly_refreshed`——worker 每小时"成功"，物化视图却永远是旧的
+        # （2026-10-26 接 fleet/stats 实测：`tele.telemetry` 1705 行，matview 只有 4 行；
+        # 换成 begin() 后立刻变 9 行、最新小时对上）。同文件 `drop_partition` 用的就是 begin()。
         engine = get_maintenance_engine()
-        async with engine.connect() as conn:
+        async with engine.begin() as conn:
             await conn.execute(text("REFRESH MATERIALIZED VIEW CONCURRENTLY rep.telemetry_hourly"))
         log.info("telemetry_repo.hourly_refreshed")
 
