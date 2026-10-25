@@ -16,8 +16,8 @@ from sqlalchemy import func, select
 from src.kuma.core.db import dispose_engine, tx
 from src.kuma.core.security import hash_password
 from src.kuma.models.core import (
-    Account, Identity, Membership, Org, Region, SubscriptionPlan, Vehicle, VehicleCredential,
-    VehicleType,
+    Account, Identity, Membership, Org, OrgBusiness, Region, SubscriptionPlan, Vehicle,
+    VehicleCredential, VehicleType,
 )
 from src.kuma.models.geo import Fence
 
@@ -33,6 +33,21 @@ DEMO_ACCOUNTS = [
 ]
 # 订阅套餐（TH 首发）。price 用整数最小货币单位（萨当，×100）：9900 = ฿99.00。
 # `features` 是能力开关，不是文案——下行控制/围栏告警/派单这些闸门按它判定。
+# 演示账号的**组织归属**：只有 `identity` 没有 `membership` 的账号，登录后
+# `principal.orgs` 是空 → `scope_kind()` 落到 `self`、`org_ids_for_line()` 恒空，
+# 经销商/运营商的列表页永远查不出东西（2026-10-26 实测：库里 membership=0、org_business=0）。
+# `role` 受 CHECK 约束（`002_core.sql:61`）且每个 org 只能有一个在职 `primary_admin`
+# （`002_core.sql:67` 的部分唯一索引），所以这里按"缺就补"写。
+DEMO_MEMBERSHIPS = [
+    ("demo_dealer", "D-TH-001", "primary_admin"),
+    ("demo_operator", "OP-TH-001", "primary_admin"),
+]
+# 业务线是**线上事实**（牌照与线下准入的镜像），没有隐式默认：没申报就拿不到换电 scope
+# （`core/scope.py:183-192`）。取值受 CHECK 约束（`0007:409-410`）。
+DEMO_BUSINESS_LINES = [
+    ("D-TH-001", "dealer", None),
+    ("OP-TH-001", "swap_operator", "DEMO-SWAP-TH-001"),
+]
 DEMO_PLANS: list[dict] = [
     dict(code="TH-BASIC-M", region_id="TH", plan_type="basic", name="基础服务（月）",
          price=9900, currency="THB", duration_days=30,
@@ -92,6 +107,37 @@ async def seed(*, print_only: bool) -> None:
             session.add_all([dealer, operator])
             await session.flush()
             dealer.path, operator.path = f"{dealer.id}/", f"{operator.id}/"
+
+        # 组织归属 + 业务线：缺就补（老库跑一遍 seed 即自愈）
+        for username, org_code, role in DEMO_MEMBERSHIPS:
+            acct = (await session.execute(
+                select(Account).where(Account.username == username))).scalar_one_or_none()
+            org = (await session.execute(
+                select(Org).where(Org.code == org_code))).scalar_one_or_none()
+            if acct is None or org is None:
+                print(f"membership skip {username}@{org_code}：账号或组织不存在")
+                continue
+            has = (await session.execute(select(Membership).where(
+                Membership.account_id == acct.id, Membership.org_id == org.id
+            ))).scalar_one_or_none()
+            if has is None:
+                session.add(Membership(account_id=acct.id, org_id=org.id,
+                                       role=role, status="active"))
+                print(f"membership +{username}@{org_code} ({role})")
+
+        for org_code, line, license_no in DEMO_BUSINESS_LINES:
+            org = (await session.execute(
+                select(Org).where(Org.code == org_code))).scalar_one_or_none()
+            if org is None:
+                print(f"org_business skip {org_code}/{line}：组织不存在")
+                continue
+            has = (await session.execute(select(OrgBusiness).where(
+                OrgBusiness.org_id == org.id, OrgBusiness.line == line
+            ))).scalar_one_or_none()
+            if has is None:
+                session.add(OrgBusiness(org_id=org.id, line=line, license_no=license_no,
+                                        status="active"))
+                print(f"org_business +{org_code}/{line}")
 
         vehicles = (await session.execute(select(Vehicle).limit(5))).scalars().all()
         if not vehicles:
