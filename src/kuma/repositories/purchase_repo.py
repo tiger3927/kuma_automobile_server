@@ -326,7 +326,18 @@ class PurchaseRepo:
 
         **排序是 `created_at ASC`（先到先核）**：队列按 FIFO 处理，
         倒序会让早到的凭证永远排在最后，超时关单 job 会先把它变成 `timeout`。
+
+        可选的 `region_id` **只在传了时才拼进 WHERE**：写成
+        `(:region IS NULL OR o.region_id = :region)` 时 asyncpg 对"参数自己判 NULL"
+        推不出类型，实测报 `could not determine data type of parameter $2`
+        （KYC 队列第一次跑就撞上了，这里同一写法一并改掉）。
         """
+        where = ["v.status = :status"]
+        p: dict[str, Any] = {"status": status, "lim": max(1, min(limit, 200)),
+                             "off": max(0, offset)}
+        if region_id:
+            where.append("o.region_id = :region")
+            p["region"] = region_id
         rows = (await session.execute(text(f"""
             SELECT v.{', v.'.join(VOUCHER_COLS.split(', '))},
                    p.pay_no, p.order_id, p.amount AS pay_amount, p.currency AS pay_currency,
@@ -338,13 +349,11 @@ class PurchaseRepo:
               JOIN fin.pay_order p ON p.id = v.pay_order_id
               JOIN commerce."order" o ON o.id = p.order_id
               LEFT JOIN fin.payment_channel ch ON ch.id = p.channel_id
-             WHERE v.status = :status
-               AND (:region IS NULL OR o.region_id = :region)
+             WHERE {' AND '.join(where)}
              ORDER BY v.created_at, v.id
              LIMIT :lim OFFSET :off
-        """), {"status": status, "region": region_id, "lim": limit,
-               "off": offset})).mappings().all()
-        return _strip_total(rows)
+        """), p)).mappings().all()
+        return _strip_total(list(rows))
 
     async def vouchers_of_pay_order(self, session: AsyncSession, pay_order_id: int
                                     ) -> list[dict[str, Any]]:

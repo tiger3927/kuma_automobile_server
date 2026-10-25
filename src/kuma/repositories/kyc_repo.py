@@ -98,20 +98,31 @@ class KycRepo:
 
         join `core.account` 是为了让审核人不用二次查询就知道"这是谁、哪个地区、现在几级"——
         账号现有等级高于申请等级时应当直接拒（重复申请/刷等级）。
+
+        **可选条件按房内写法拼进 WHERE**（只在传了时才加），不写
+        `(:region IS NULL OR a.region_id = :region)`：asyncpg 对"参数自己判 NULL"
+        推不出类型，实测报 `could not determine data type of parameter $2`
+        （`points_repo` / `energy_repo` 一律把**列**放在 `IS NULL` 左边，同一个道理）。
         """
+        where = ["k.status = :status"]
+        p: dict[str, Any] = {"status": status, "lim": max(1, min(limit, 200)),
+                             "off": max(0, offset)}
+        if region_id:
+            where.append("a.region_id = :region")
+            p["region"] = region_id
+        if level:
+            where.append("k.level = :level")
+            p["level"] = level
         rows = (await session.execute(text(f"""
             SELECT k.{', k.'.join(KYC_COLS.split(', '))},
                    a.username, a.phone, a.region_id, a.kyc_level AS account_kyc_level,
                    count(*) OVER() AS total
               FROM core.kyc_record k
               JOIN core.account a ON a.id = k.account_id
-             WHERE k.status = :status
-               AND (:region IS NULL OR a.region_id = :region)
-               AND (:level IS NULL OR k.level = :level)
+             WHERE {' AND '.join(where)}
              ORDER BY k.created_at, k.id
              LIMIT :lim OFFSET :off
-        """), {"status": status, "region": region_id, "level": level, "lim": limit,
-               "off": offset})).mappings().all()
+        """), p)).mappings().all()
         return _strip_total(list(rows))
 
     async def set_review(self, session: AsyncSession, *, kyc_id: int, status: str,
