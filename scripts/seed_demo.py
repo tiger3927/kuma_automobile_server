@@ -38,6 +38,11 @@ DEMO_ACCOUNTS = [
     ("demo_owner", "owner"), ("demo_driver", "driver"),
     ("demo_dealer", "dealer_staff"), ("demo_operator", "operator_staff"),
     ("demo_regulator", "regulator"), ("demo_platform", "platform_staff"),
+    # 双人授权（§9.5 / `core/scope.py:128-133` DUAL_CONTROL）要求**两个真实的人**：
+    # 收款核销、退款、改积分规则、KYC 审核通过、下行指令都要一个非本人的
+    # active `platform_staff`（`services/dual_control.py:35-44`）。
+    # 只有一个平台账号时这些流程**永远跑不通**——不是 bug，是缺第二个人。
+    ("demo_platform2", "platform_staff"),
 ]
 # 订阅套餐（TH 首发）。price 用整数最小货币单位（萨当，×100）：9900 = ฿99.00。
 # `features` 是能力开关，不是文案——下行控制/围栏告警/派单这些闸门按它判定。

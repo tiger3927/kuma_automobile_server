@@ -364,6 +364,24 @@ class PurchaseRepo:
         """), {"id": pay_order_id})).mappings().all()
         return [dict(r) for r in rows]
 
+    async def co_approver_candidates(self, session: AsyncSession, *, role: str = "platform_staff",
+                                     limit: int = 50) -> list[dict[str, Any]]:
+        """联审候选人（§9.5 双人授权）。
+
+        **条件必须和 `services/dual_control.py:37-44` 一模一样**：active 的 `role` 身份
+        + active 账号。列表里能选、提交却被 `co_approver_not_{role}` 挡掉，
+        等于把后端的校验当界面 bug。只回 `account_id` / `username`：
+        核销人需要的是"能追责的人"，不是对方的手机号与证件（§13 最小可见）。
+        """
+        return [dict(r) for r in (await session.execute(text("""
+            SELECT i.account_id, a.username, i.identity_type
+              FROM core.identity i
+              JOIN core.account a ON a.id = i.account_id
+             WHERE i.identity_type = :role AND i.status = 'active' AND a.status = 'active'
+             ORDER BY i.account_id
+             LIMIT :lim
+        """), {"role": role, "lim": max(1, min(limit, 200))})).mappings().all()]
+
     async def set_voucher_status(self, session: AsyncSession, *, voucher_id: int, status: str,
                                  verifier: int) -> dict[str, Any] | None:
         row = (await session.execute(text(f"""

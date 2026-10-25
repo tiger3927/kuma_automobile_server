@@ -181,6 +181,17 @@ async def upload_voucher(pay_no: str, body: VoucherIn, request: Request,
         currency=body.currency, proof_url=body.proof_url, ip=_ip(request))
 
 
+@router.get("/co-approvers")
+async def co_approvers(principal: PrincipalDep, session: Db,
+                       limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+    """联审候选人（核销与退款都要双人，§9.5）。
+
+    没有这个读端点，前端只能让人手填 `co_approver_account_id`——填错就是
+    `co_approver_not_platform_staff`，核销台变成猜账号游戏。
+    """
+    return await purchase_svc.co_approvers(session, principal, limit=limit)
+
+
 @router.post("/pay-vouchers/{voucher_id}/verify")
 async def verify_voucher(voucher_id: int, body: VoucherVerifyIn, request: Request,
                          principal: PrincipalDep, session: Db) -> dict[str, Any]:

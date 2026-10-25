@@ -255,6 +255,17 @@ class PurchaseService:
         return {"items": rows, "total": total, "limit": limit, "offset": offset,
                 "status": status, "region_id": region_id}
 
+    async def co_approvers(self, session: AsyncSession, principal: Principal, *,
+                           limit: int = 50) -> dict[str, Any]:
+        """谁能联审（§9.5）。权限跟队列一致（`payout_verify:read`）：
+        看不到队列的人不需要候选人名单。
+
+        **不在这层挡本人**：界面要把"本人"标出来并禁用，返回完整名单比偷偷少一条更好排查；
+        真正的"不能是本人"由 `require_co_approver` 判（`dual_control.py:35-36`）。
+        """
+        principal.require("payout_verify", "read")
+        return {"items": await self.repo.co_approver_candidates(session, limit=limit)}
+
     async def verify_voucher(self, session: AsyncSession, principal: Principal, *, voucher_id: int,
                              approve: bool, co_approver_account_id: int | None = None,
                              ip: str | None = None) -> dict[str, Any]:
