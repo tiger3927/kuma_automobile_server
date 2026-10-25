@@ -186,6 +186,7 @@ async def realtime(sims: list[Sim], seconds: float, interval: float) -> None:
         stats = await TelemetryService().ingest(pts)
         for p in pts:
             await publish_vin(p.vin, "telemetry", {
+                "vin": p.vin,
                 "ts": p.ts, "lat": p.lat, "lon": p.lon, "speed_kmh": p.speed_kmh,
                 "soc": p.soc, "odo_km": p.odo_km,
             })

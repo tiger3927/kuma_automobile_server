@@ -118,7 +118,11 @@ class InboundPipeline:
         if p.ts < datetime.now(UTC) - timedelta(hours=s.backfill_max_hours):
             return
         try:
+            # payload 里必须带 vin：channel `kuma:rt:{vin}` 只用于服务端路由，
+            # 到了浏览器手里就没了——订阅多台车时，不带 vin 的 telemetry 事件
+            # 根本分不清是哪台（地图会把 A 车的位置画到 B 车上）。
             await publish_vin(p.vin, "telemetry", {
+                "vin": p.vin,
                 "ts": p.ts, "lat": p.lat, "lon": p.lon, "speed_kmh": p.speed_kmh,
                 "soc": p.soc, "odo_km": p.odo_km,
             })
