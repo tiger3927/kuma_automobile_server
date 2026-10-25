@@ -170,6 +170,20 @@ async def register_battery(body: BatteryIn, request: Request, principal: Princip
     return await stations_svc.register_battery(session, principal, body, ip=_ip(request))
 
 
+@router.get("/batteries")
+async def list_batteries(principal: PrincipalDep, session: Db,
+                         station_id: int | None = Query(default=None),
+                         status: str | None = Query(default=None),
+                         model_code: str | None = Query(default=None),
+                         q: str | None = Query(default=None, max_length=64),
+                         limit: int = Query(default=50, ge=1, le=200),
+                         offset: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    """电池台账翻页（带 `total`）。scope 按**归属运营商**收敛，不是按所在站点。"""
+    return await stations_svc.batteries(session, principal, station_id=station_id,
+                                        status=status, model_code=model_code, q=q,
+                                        limit=limit, offset=offset)
+
+
 @router.get("/batteries/{battery_sn}")
 async def get_battery(battery_sn: str, principal: PrincipalDep,
                       session: Db) -> dict[str, Any]:

@@ -29,6 +29,11 @@ from ..schemas.energy import (
 STOCK_STATUSES = ("ready", "charging", "faulty")
 MANUAL_TARGETS = ("in_stock", "charging", "ready", "returned", "faulty", "repair",
                   "retired", "lost", "stolen")
+#: `energy.battery.status` 的全集（`0007_energy_swap_domain.py` 的 CHECK）。
+#: 台账过滤要照这份校验：写错状态返回空列表会被读成"没有这种电池"，
+#: 而不是"我过滤条件打错了"（与 `kyc_service.queue` 的 `bad_status` 同一立场）。
+BATTERY_STATUSES = ("in_stock", "charging", "ready", "leased", "returned", "faulty",
+                    "repair", "retired", "lost", "stolen")
 
 
 def _stock_delta(from_status: str | None, to_status: str) -> tuple[int, int, int]:
@@ -250,6 +255,38 @@ class StationService:
         binding = await self.repo.active_binding(session, battery_sn=battery_sn)
         return {"battery": battery, "on_vin": (binding or {}).get("vin"),
                 "flows": await self.repo.flows(session, battery_sn)}
+
+    async def batteries(self, session: AsyncSession, principal: Principal, *,
+                        station_id: int | None = None, status: str | None = None,
+                        model_code: str | None = None, q: str | None = None,
+                        limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """电池台账翻页（W6 admin 台账页 / SOC 巡检清单 / 库存核对）。
+
+        **之前没有这个端点**：只有 `POST /batteries`、`GET /batteries/{sn}`、
+        `POST /batteries/{sn}/status`——台账页要按状态/站点/型号过滤就只能一块一块 SN 查。
+
+        scope 与 `_assert_battery_visible` **同一口径**：按 `owner_org_id` 收敛，
+        不是按所在站点（寄放在我家站上的别家电池不进我的台账）。
+        没有换电业务线的账号返回空列表而不是 403：菜单已按 `business_lines` 隐藏，
+        这里报错只会把"越权探测"变成可用信号（`principal.require("battery","read")`
+        仍然先跑，无权限身份照样 403）。
+        """
+        principal.require("battery", "read")
+        if status and status not in BATTERY_STATUSES:
+            raise ValidationFailed(f"status 必须在 {list(BATTERY_STATUSES)}", code="bad_status")
+        if principal.is_platform or principal.is_regulator:
+            orgs: list[int] | None = None
+        else:
+            orgs = principal.org_ids_for_line("swap_operator")
+            if not orgs:
+                return {"items": [], "total": 0, "limit": limit, "offset": offset}
+        if station_id is not None:
+            # 只能按自己可见的站过滤，否则这个参数就成了"探测别人站点 id"的探针
+            await self._get_visible(session, principal, station_id)
+        items, total = await self.repo.list_batteries(
+            session, owner_org_ids=orgs, station_id=station_id, status=status,
+            model_code=model_code, q=q, limit=limit, offset=offset)
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     async def stock(self, session: AsyncSession, principal: Principal,
                     station_id: int) -> dict[str, Any]:

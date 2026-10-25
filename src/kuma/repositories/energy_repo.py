@@ -255,6 +255,48 @@ class EnergyRepo:
         ), {"sn": battery_sn})).mappings().one_or_none()
         return dict(row) if row else None
 
+    async def list_batteries(self, session: AsyncSession, *, owner_org_ids: list[int] | None,
+                             station_id: int | None = None, status: str | None = None,
+                             model_code: str | None = None, q: str | None = None,
+                             limit: int = 50, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        """电池台账翻页 + 总数（W6 admin 台账页与 SOC 巡检清单要按状态/站点/型号过滤）。
+
+        `owner_org_ids=None` 表示不收敛（平台 / 监管），否则按 **`owner_org_id`** 过滤——
+        与 `station_service._assert_battery_visible` 同一口径：电池按**归属运营商**可见，
+        不是按所在站点。别家运营商把电池寄放在我的站，那块电池不是我台账里的资产
+        （押金赔偿、库存计数都按归属算）。三个过滤列各有索引（`idx_battery_owner` /
+        `idx_battery_station` / `idx_battery_model`）。
+
+        `count(*) OVER()` 而不是第二条 count：台账正被巡检与换电并发改状态，
+        分开两条 SQL 会数出"页内容里没有的那一块"（§11-5 要的就是"共 N 块"能对上）。
+        """
+        sql = f"SELECT {BATTERY_COLS}, count(*) OVER() AS total FROM energy.battery WHERE true"
+        p: dict[str, Any] = {"limit": max(1, min(limit, 200)), "offset": max(0, offset)}
+        if owner_org_ids is not None:
+            sql += " AND owner_org_id = ANY(:orgs)"
+            p["orgs"] = list(owner_org_ids)
+        if station_id is not None:
+            sql += " AND station_id = :sid"
+            p["sid"] = station_id
+        if status:
+            sql += " AND status = :status"
+            p["status"] = status
+        if model_code:
+            sql += " AND model_code = :mc"
+            p["mc"] = model_code
+        if q:
+            sql += " AND battery_sn ILIKE :q"
+            p["q"] = f"%{q}%"
+        # 按 SN 升序：台账的自然键，翻页稳定（`created_at` 会因批量入池并列而漏行/重行）
+        sql += " ORDER BY battery_sn LIMIT :limit OFFSET :offset"
+        items: list[dict[str, Any]] = []
+        total = 0
+        for r in (await session.execute(text(sql), p)).mappings().all():
+            d = dict(r)
+            total = int(d.pop("total"))
+            items.append(d)
+        return items, total
+
     async def lock_batteries(self, session: AsyncSession, sns: list[str]) -> list[dict[str, Any]]:
         """**换电并发防线**：按 SN 升序锁行（固定顺序避免死锁），已被别人锁住 → 返回空。
 
