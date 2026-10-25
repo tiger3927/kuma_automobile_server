@@ -16,8 +16,16 @@ from sqlalchemy import func, select
 from src.kuma.core.db import dispose_engine, tx
 from src.kuma.core.security import hash_password
 from src.kuma.models.core import (
-    Account, Identity, Membership, Org, OrgBusiness, Region, SubscriptionPlan, Vehicle,
-    VehicleCredential, VehicleType,
+    Account,
+    Identity,
+    Membership,
+    Org,
+    OrgBusiness,
+    Region,
+    SubscriptionPlan,
+    Vehicle,
+    VehicleCredential,
+    VehicleType,
 )
 from src.kuma.models.geo import Fence
 
