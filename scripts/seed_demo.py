@@ -132,6 +132,12 @@ async def seed(*, print_only: bool) -> None:
                 session.add(Membership(account_id=acct.id, org_id=org.id,
                                        role=role, status="active"))
                 print(f"membership +{username}@{org_code} ({role})")
+            # `org.primary_account_id` 和 `membership.role='primary_admin'` 是同一件事的两种写法，
+            # 必须一致：seed 直接建 `Org`、没走 `org_service.create()`（`org_service.py:41-45`），
+            # 所以这个字段一直是 NULL，`/orgs` 列表与主管理员转移流程都对不上（2026-10-26 实测）。
+            if role == "primary_admin" and org.primary_account_id is None:
+                org.primary_account_id = acct.id
+                print(f"org.primary_account_id +{org_code}#{acct.id}")
 
         for org_code, line, license_no in DEMO_BUSINESS_LINES:
             org = (await session.execute(
