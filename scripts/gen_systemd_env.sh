@@ -18,6 +18,15 @@ if ! grep -q '^KUMA_MQ_AUTH_TOKEN=' deploy/.env; then
   echo "KUMA_MQ_AUTH_TOKEN=${TOKEN}" >> deploy/.env
   echo "已生成并写入 deploy/.env 的 KUMA_MQ_AUTH_TOKEN（要同步进 rabbitmq.conf 的四个 URL）"
 fi
+# 证件号哈希的 pepper（KYC，2026-10-26）。**必须独立于 jwt_secret 且长期不变**：
+# 哈希要确定性（§2.3-25"同证件多账号 → 关联标记"靠同证件同哈希），
+# 而缺省时 `config.py` 会回落到 jwt_secret —— 轮换 jwt_secret 会让历史关联全部断掉。
+# 所以这里缺就生成一份，写死在 .env（Debug.md 是唯一凭据台账，值不进 git）。
+if ! grep -q '^KUMA_ID_HASH_PEPPER=' deploy/.env; then
+  PEPPER="$(head -c 32 /dev/urandom | base64 | tr -d '/+=')"
+  echo "KUMA_ID_HASH_PEPPER=${PEPPER}" >> deploy/.env
+  echo "已生成并写入 deploy/.env 的 KUMA_ID_HASH_PEPPER（轮换它等于让历史证件关联失效，别随手换）"
+fi
 set -a; . deploy/.env; set +a
 
 # kuma 独立 redis（2026-10-22，Task-Server.md §4.1）要求有口令：**缺就报错退出**，
@@ -48,6 +57,8 @@ OUT=deploy/runtime.env
   echo "KUMA_MQTT_VHOST=/kuma"
   echo "KUMA_MQ_AUTH_TOKEN=${KUMA_MQ_AUTH_TOKEN}"
   echo "KUMA_JWT_SECRET=${KUMA_JWT_SECRET}"
+  # 上面已保证存在（缺则生成），所以这里无条件写。
+  echo "KUMA_ID_HASH_PEPPER=${KUMA_ID_HASH_PEPPER}"
   # 地图 key（Debug.md 高德节）：此前白名单不透传，key 写进 .env 服务也读不到。
   # 缺行不炸（road 口径 v1 不做，key 可以缺席），有值才写——空串写进去没有意义。
   [ -n "${KUMA_AMAP_KEY:-}" ] && echo "KUMA_AMAP_KEY=${KUMA_AMAP_KEY}"
