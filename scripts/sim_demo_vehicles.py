@@ -142,7 +142,7 @@ async def build_sims(vins: list[str], speed: float) -> list[Sim]:
     state = StateRepo()
     sims: list[Sim] = []
     for i, vin in enumerate(vins):
-        route = ROUTES[i % len(ROUTES)]
+        route = Route(ROUTES[i % len(ROUTES)])
         prev = await state.get(vin) or {}
         sims.append(Sim(
             vin=vin, route=route,
