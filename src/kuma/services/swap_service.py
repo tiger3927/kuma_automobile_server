@@ -345,10 +345,10 @@ class SwapService:
         from ..repositories.base import swap_scope
 
         sub = swap_scope(principal).subquery()
-        items = await self.repo.list_swaps(session, scope_subquery=select(sub.c.id),
-                                           status=status, station_id=station_id,
-                                           limit=limit, offset=offset)
-        return {"items": items, "limit": limit, "offset": offset}
+        items, total = await self.repo.list_swaps(session, scope_subquery=select(sub.c.id),
+                                                  status=status, station_id=station_id,
+                                                  limit=limit, offset=offset)
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
 
     async def rejections(self, session: AsyncSession, principal: Principal, *,
                          station_id: int | None = None, days: int = 7) -> dict:

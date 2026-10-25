@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Request
 
 from ...core.deps import Db, PrincipalDep, client_ip
-from ...schemas.auth import MemberIn, OrgCreateIn, PrimaryAdminTransferIn
+from ...schemas.auth import MemberIn, OrgContactIn, OrgCreateIn, PrimaryAdminTransferIn
 from ...services.org_service import OrgService
 
 router = APIRouter(prefix="/orgs", tags=["org"])
@@ -41,8 +43,21 @@ async def transfer_primary(org_id: int, body: PrimaryAdminTransferIn, request: R
         ip=client_ip(request))
 
 
+@router.patch("/{org_id}")
+async def update_org(org_id: int, body: OrgContactIn, request: Request, session: Db,
+                     principal: PrincipalDep) -> dict[str, Any]:
+    """改组织名称与联系方式（迁移 0010 加的 address/phone/lat/lng；portal 门店页要用）。"""
+    return await svc.update_contact(session, principal, org_id, name=body.name,
+                                    address=body.address, phone=body.phone,
+                                    lat=body.lat, lng=body.lng, ip=client_ip(request))
+
+
 @router.get("/{org_id}/members")
 async def members(org_id: int, session: Db, principal: PrincipalDep) -> dict:
-    principal.require("org", "read")
-    rows = await svc.accounts.memberships(session, principal.account_id)
-    return {"items": [{"org_id": o.id, "role": m.role} for m, o in rows if o.id == org_id]}
+    """该组织在职成员 + 每人有效身份（**双人授权选联审人的唯一来源**，`Task-Web.md` §5-6）。
+
+    旧实现查的是"调用者自己的身份按 org_id 过滤"——主管理员看不见自己组织的成员名单，
+    前端只能盲填 account_id 再吃 `co_approver_not_platform_staff`。
+    响应仍是 `{"items": [...]}` 信封，只是条目变成真实成员。
+    """
+    return {"items": await svc.members(session, principal, org_id)}

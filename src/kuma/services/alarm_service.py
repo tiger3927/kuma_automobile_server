@@ -23,7 +23,7 @@ from ..core.scope import Principal
 from ..models.biz import Alarm, AlarmAck
 from ..models.core import Vehicle
 from ..repositories.alarm_repo import AlarmRepo
-from ..repositories.base import assert_vehicle_visible
+from ..repositories.base import assert_vehicle_visible, count_of
 
 
 async def raise_alarm(session: AsyncSession, *, vin: str, ts: datetime, type_: str,
@@ -59,13 +59,16 @@ class AlarmService:
     async def page(self, session: AsyncSession, principal: Principal, *, vin: str | None = None,
                    status: str | None = None, type_: str | None = None,
                    page: PageParams | None = None) -> dict:
+        p = page or PageParams()
         rows = (await session.execute(
-            self.repo.page(principal, vin=vin, status=status, type_=type_, page=page)
+            self.repo.page(principal, vin=vin, status=status, type_=type_, page=p)
         )).scalars().all()
+        total = await count_of(session, self.repo.filters(principal, vin=vin, status=status,
+                                                          type_=type_))
         return {"items": [{"id": a.id, "vin": a.vin, "ts": a.ts, "type": a.type, "level": a.level,
                            "status": a.status, "snooze_until": a.snooze_until,
                            "payload": a.payload} for a in rows],
-                "limit": (page or PageParams()).limit, "offset": (page or PageParams()).offset}
+                "limit": p.limit, "offset": p.offset, "total": total}
 
     async def detail(self, session: AsyncSession, principal: Principal, alarm_id: int) -> dict:
         alarm = await self._visible(session, principal, alarm_id)

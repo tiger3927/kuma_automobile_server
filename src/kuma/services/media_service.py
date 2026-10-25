@@ -21,7 +21,7 @@ import secrets
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import write_audit
@@ -34,10 +34,11 @@ from ..repositories.base import assert_vehicle_visible
 
 log = get_logger("services.media")
 
-# 与 `core.media.owner_type` 的 CHECK 取值域严格一致（migrations/sql/002_core.sql:241）
+# 与 `core.media.owner_type` 的 CHECK 取值域**严格一致**
+# （基线 `migrations/sql/002_core.sql:241` + 迁移 `0010` 加 `payment_channel`）
 OWNER_TYPES = frozenset({
     "vehicle_type", "vehicle", "product", "sku", "order", "aftersale",
-    "driver_profile", "org", "account",
+    "driver_profile", "org", "account", "payment_channel",
 })
 # owner_type → 需要的 (resource, action)。不在表里的 owner_type 一律拒绝。
 OWNER_PERM: dict[str, tuple[str, str]] = {
@@ -50,9 +51,16 @@ OWNER_PERM: dict[str, tuple[str, str]] = {
     "org": ("org", "write"),
     "account": ("self", "write"),
     "driver_profile": ("driver_review", "write"),
+    # 收款渠道的二维码/收款指引：**不能挂 `payment:write`**——矩阵里
+    # `payment:write` 给了 consumer/owner/dealer/operator（那是"我付款"的权限），
+    # 用它等于任何人都能往收款渠道上贴一张**假二维码**，用户扫了就转进别人账户。
+    # 这是收款侧的配置动作，落在 `payout_verify:write`（矩阵：只有 platform_staff 有）。
+    "payment_channel": ("payout_verify", "write"),
 }
-# 公开可读（车型图、商品图、门头照要能被官网/游客侧看到）
-PUBLIC_OWNERS = frozenset({"vehicle_type", "product", "sku"})
+# 公开可读（车型图、商品图、门头照要能被官网/游客侧看到）。
+# `payment_channel` 也在里面：付款的人必须看得见二维码，否则 §11-3 等于没补；
+# 二维码本身不是秘密——`pay_instructions` 已经把 `account_entity` 明文给了付款人。
+PUBLIC_OWNERS = frozenset({"vehicle_type", "product", "sku", "payment_channel"})
 # mime → 落盘扩展名。**白名单外一律拒绝**，不接受客户端声明的 filename 后缀。
 ALLOWED_MIME: dict[str, str] = {
     "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "application/pdf": "pdf",
@@ -98,7 +106,16 @@ class MediaService:
 
     async def _check_target(self, session: AsyncSession, principal: Principal,
                             owner_type: str, owner_id: int) -> None:
-        """vehicle 类要过归属校验，别把图挂到别人车上。"""
+        """挂载目标必须真实存在且归该 principal 管——别把图挂到别人车上或虚构的渠道上。"""
+        if owner_type == "payment_channel":
+            # `fin.payment_channel` 没有 ORM 模型（只有 `purchase_repo.channel_for` 在用），
+            # 这里按房内惯例用 text() 查一行存在性。虚构 owner_id 会造出
+            # "media 行有、渠道没有"的孤儿二维码，付款页取不到又不知道为什么。
+            got = (await session.execute(text(
+                "SELECT id FROM fin.payment_channel WHERE id = :id"))).scalar()
+            if got is None:
+                raise NotFound("收款渠道不存在", code="payment_channel_not_found")
+            return
         if owner_type != "vehicle":
             return
         vehicle = (await session.execute(

@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     jwt_alg: str = Field("HS256", alias="KUMA_JWT_ALG")
     access_ttl: int = Field(900, alias="KUMA_ACCESS_TTL")
     refresh_ttl: int = Field(2_592_000, alias="KUMA_REFRESH_TTL")
+    # 证件号哈希的 pepper（KYC）。哈希必须**确定性**——§2.3-25"同证件多账号 → 关联标记"
+    # 靠的就是同一个证件号算出同一个哈希；但裸 `sha256(证件号)` 能被撞库还原
+    # （各国证件号格式固定、长度有限），所以必须 HMAC 加 pepper。
+    # 留空回落到 `jwt_secret`：能跑，但轮换 jwt_secret 会让历史关联断掉——生产应显式配置。
+    id_hash_pepper: str = Field("", alias="KUMA_ID_HASH_PEPPER")
 
     # 遥测管道
     tele_batch_size: int = Field(500, alias="KUMA_TELE_BATCH_SIZE")

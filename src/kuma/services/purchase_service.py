@@ -56,6 +56,12 @@ PACK_REFUND_SOURCE = "points_pack_refund"
 
 #: 可付状态（§5.2 收款线）；`paid/closed/timeout` 之后不能再核销
 OPEN_PAY_STATUSES = ("created", "qr_issued", "voucher_pending", "verifying")
+#: 凭证状态取值域。库里 `fin.payment_voucher.status` **没有 CHECK**（`models/fin.py` 的
+#: `PaymentVoucher.status` 只有 `server_default='pending'`），
+#: 取值域只能由代码定死——队列端点必须按这个白名单校验 `status` 查询参数，
+#: 否则 `?status=anything` 会原样进 SQL 绑定（虽然参数化不会注入，但会静默返回空列表，
+#: 让核销人以为"没活干"）。
+VOUCHER_STATUSES = ("pending", "verified", "rejected")
 
 _LIABILITY_SQL = text("""
     SELECT snapshot_date, account_id, booked_points, currency, cash_equiv, created_at
@@ -211,7 +217,44 @@ class PurchaseService:
                           ip=ip)
         return voucher
 
+    async def pay_order_view(self, session: AsyncSession, principal: Principal, *, pay_no: str
+                             ) -> dict[str, Any]:
+        """支付单 + 它名下的凭证（用户侧"我回填的流水号审到哪一步了"）。
+
+        `Task-Web.md` §11-1 的另一半：没有这个读端点，用户回填完只能干等，
+        被驳回也不知道为什么、要不要重填。
+        """
+        principal.require("payment", "read")
+        pay = await self.repo.pay_order_by_no(session, pay_no)
+        if pay is None:
+            raise NotFound("支付单不存在", code="pay_order_not_found")
+        # 自己的单；或者本来就有核销读权限的人（客服/财务代查）
+        if int(pay["account_id"]) != principal.account_id \
+                and not principal.can("payout_verify", "read"):
+            raise Forbidden("不是你的支付单", code="not_your_pay_order")
+        pay["vouchers"] = await self.repo.vouchers_of_pay_order(session, int(pay["id"]))
+        return pay
+
     # ══ 平台侧：核销 / 退款 / 配包 / 负债报表 ═══════════════════════════════════
+    async def verify_queue(self, session: AsyncSession, principal: Principal, *,
+                           status: str = "pending", region_id: str | None = None,
+                           limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """待核销队列（§9.5 收款核销工作台）。**只读**，核销动作在 `verify_voucher`。
+
+        权限是 `payout_verify:read`（矩阵：dealer/operator 只读、platform 读写）——
+        队列里是别人的转账凭证与账号信息，不能给无关身份看。
+        **没有按 org 收敛的 scope**：v1 的收款主体是平台（`payment_channel.account_entity`），
+        经销商/运营商拿到只读是为了对账，跨区可见由 `region_id` 参数自己筛。
+        """
+        principal.require("payout_verify", "read")
+        if status not in VOUCHER_STATUSES:
+            raise ValidationFailed(f"status 必须在 {list(VOUCHER_STATUSES)}", code="bad_status")
+        rows, total = await self.repo.vouchers_page(session, status=status,
+                                                    region_id=region_id, limit=limit,
+                                                    offset=offset)
+        return {"items": rows, "total": total, "limit": limit, "offset": offset,
+                "status": status, "region_id": region_id}
+
     async def verify_voucher(self, session: AsyncSession, principal: Principal, *, voucher_id: int,
                              approve: bool, co_approver_account_id: int | None = None,
                              ip: str | None = None) -> dict[str, Any]:
@@ -353,8 +396,9 @@ class PurchaseService:
     async def my_purchases(self, session: AsyncSession, principal: Principal, *, limit: int = 50,
                            offset: int = 0) -> dict[str, Any]:
         principal.require("points", "read")
-        return {"items": await self.repo.purchases_of_account(session, principal.account_id,
-                                                              limit=limit, offset=offset)}
+        rows, total = await self.repo.purchases_of_account(session, principal.account_id,
+                                                           limit=limit, offset=offset)
+        return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
     async def liability(self, session: AsyncSession, principal: Principal, *,
                         snapshot_date) -> dict[str, Any]:

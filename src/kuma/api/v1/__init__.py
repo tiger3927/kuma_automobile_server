@@ -12,6 +12,7 @@ from . import (
     fleet,
     gdpr,
     gov,
+    kyc,
     media,
     orgs,
     points,
@@ -28,6 +29,8 @@ api_router.include_router(orgs.router)
 api_router.include_router(vehicles.router)
 api_router.include_router(media.router)
 api_router.include_router(gdpr.router)     # /me/data 与 /me/erasure
+api_router.include_router(kyc.me_router)   # /me/kyc：本人提交与查看（kyc:write / kyc:read）
+api_router.include_router(kyc.router)      # /kyc/queue、/kyc/{id}/review：平台审核（kyc:review，双人）
 api_router.include_router(fleet.router)
 api_router.include_router(trips.router)
 api_router.include_router(alarms.router)

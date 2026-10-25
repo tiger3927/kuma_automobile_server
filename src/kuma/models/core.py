@@ -13,6 +13,7 @@ from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     Numeric,
@@ -74,6 +75,13 @@ class Org(Base):
         BigInteger, ForeignKey("core.account.id"), unique=True)
     # M15：集团聚合（兼容"多法人各持牌"）；NULL = 不属任何集团
     group_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("core.org_group.id"))
+    # 迁移 0010：门店联系方式与坐标（portal 经销商页要展示，之前无列只能显示名称+国家）。
+    # 坐标是 double precision + 范围 CHECK，**不是 PostGIS geography**——门店"附近"查询在 v1
+    # 的量级下够用，不给 core 表增加 PostGIS 依赖（围栏那套口径在 geo/sql.py）。
+    address: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(Text)
+    lat: Mapped[float | None] = mapped_column(Float)
+    lng: Mapped[float | None] = mapped_column(Float)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -185,6 +193,22 @@ class UserProfile(Base):
 
 
 class KycRecord(Base):
+    """实名认证记录（`Task-Plan.md` §8.6-24 三档）。
+
+    **等级取值域**（迁移 0010 起由 CHECK `level BETWEEN 1 AND 3` 钉死）：
+    1 = 手机号 OTP 级（打车）、2 = 当地基础证件级（**买积分门槛**、换电免押）、
+    3 = 完整证件 + 驾照 + 背景审查（司机）。`core.account.kyc_level` 是"已授予的最高等级"，
+    审核通过时取 `max(现值, 本行 level)`。
+
+    **状态取值域**：`pending`（提交后）/ `approved`（`uq_kyc_approved` 部分唯一索引按它去重：
+    同账号同等级只能有一条通过记录）/ `rejected`（驳回，可重新提交）/
+    `revoked`（GDPR 匿名化时写，`gdpr_service.py`）。
+
+    `docs` 是 jsonb，本轮定死的形状：`{"media_ids": [core.media.id…], "note": str,
+    "review_reason": str}`——证件照片走 `core.media(owner_type='account')`，
+    库里只存 media id，**不存文件路径也不存证件号明文**（`id_number_hash` 是 sha256）。
+    """
+
     __tablename__ = "kyc_record"
     __table_args__ = {"schema": "core"}
 

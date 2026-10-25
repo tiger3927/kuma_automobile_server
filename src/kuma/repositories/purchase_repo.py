@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -39,6 +40,21 @@ VOUCHER_COLS = ("id, pay_order_id, transfer_no, amount, currency, proof_url, upl
                 "status, verified_by, verified_at, created_at")
 PURCHASE_COLS = ("id, purchase_no, order_id, account_id, pack_id, points, amount, currency, "
                  "status, paid_at, created_at")
+
+
+def _strip_total(rows: Sequence[Any]) -> tuple[list[dict[str, Any]], int]:
+    """把 `count(*) OVER() AS total` 从行里摘出来（行是给前端的条目，总数是分页元数据）。
+
+    零行时窗口函数没有行可挂 → 返回 0 而不是 None：列表页要显示"共 0 条"，
+    显示"未知"会让前端退回"加载更多"（`Task-Web.md` §11-5 要的就是能显示总数）。
+    """
+    items: list[dict[str, Any]] = []
+    total = 0
+    for r in rows:
+        d = dict(r)
+        total = int(d.pop("total"))
+        items.append(d)
+    return items, total
 
 
 class PurchaseRepo:
@@ -296,6 +312,49 @@ class PurchaseRepo:
         """), {"id": voucher_id})).mappings().one_or_none()
         return dict(row) if row else None
 
+    async def vouchers_page(self, session: AsyncSession, *, status: str,
+                            region_id: str | None, limit: int, offset: int
+                            ) -> tuple[list[dict[str, Any]], int]:
+        """**待核销队列**（§9.5 收款核销工作台，`Task-Web.md` §11-1 补的读端点）。
+
+        为什么要 join 到订单与渠道：核销人要看的是"这笔钱对应谁的哪张单、该付多少、
+        付到哪个收款主体"——只给 voucher 行等于让人回去查库（有按钮没列表的旧状态）。
+
+        `count(*) OVER()` 而不是第二条 count 查询：队列翻页要显示"共 N 条"，
+        两条 SQL 之间有新凭证进来就会出现"总数与页内容不一致"。
+        零行时窗口函数没有行可挂 → 总数按 0 报。
+
+        **排序是 `created_at ASC`（先到先核）**：队列按 FIFO 处理，
+        倒序会让早到的凭证永远排在最后，超时关单 job 会先把它变成 `timeout`。
+        """
+        rows = (await session.execute(text(f"""
+            SELECT v.{', v.'.join(VOUCHER_COLS.split(', '))},
+                   p.pay_no, p.order_id, p.amount AS pay_amount, p.currency AS pay_currency,
+                   p.status AS pay_status, p.expires_at, p.channel_id,
+                   o.order_no, o.account_id, o.status AS order_status, o.order_type,
+                   o.region_id, ch.channel_code, ch.account_entity,
+                   count(*) OVER() AS total
+              FROM fin.payment_voucher v
+              JOIN fin.pay_order p ON p.id = v.pay_order_id
+              JOIN commerce."order" o ON o.id = p.order_id
+              LEFT JOIN fin.payment_channel ch ON ch.id = p.channel_id
+             WHERE v.status = :status
+               AND (:region IS NULL OR o.region_id = :region)
+             ORDER BY v.created_at, v.id
+             LIMIT :lim OFFSET :off
+        """), {"status": status, "region": region_id, "lim": limit,
+               "off": offset})).mappings().all()
+        return _strip_total(rows)
+
+    async def vouchers_of_pay_order(self, session: AsyncSession, pay_order_id: int
+                                    ) -> list[dict[str, Any]]:
+        """支付单名下的凭证（用户侧查"我回填的流水号审到哪一步了"）。"""
+        rows = (await session.execute(text(f"""
+            SELECT {VOUCHER_COLS} FROM fin.payment_voucher
+             WHERE pay_order_id = :id ORDER BY id
+        """), {"id": pay_order_id})).mappings().all()
+        return [dict(r) for r in rows]
+
     async def set_voucher_status(self, session: AsyncSession, *, voucher_id: int, status: str,
                                  verifier: int) -> dict[str, Any] | None:
         row = (await session.execute(text(f"""
@@ -353,12 +412,13 @@ class PurchaseRepo:
         return dict(row) if row else None
 
     async def purchases_of_account(self, session: AsyncSession, account_id: int, *, limit: int,
-                                   offset: int) -> list[dict[str, Any]]:
+                                   offset: int) -> tuple[list[dict[str, Any]], int]:
+        """我的购买记录 + 总数（`Task-Web.md` §11-5：列表页要能显示"共 N 条"）。"""
         rows = (await session.execute(text(f"""
-            SELECT {PURCHASE_COLS} FROM mkt.points_purchase
+            SELECT {PURCHASE_COLS}, count(*) OVER() AS total FROM mkt.points_purchase
              WHERE account_id = :id ORDER BY created_at DESC, id DESC LIMIT :lim OFFSET :off
         """), {"id": account_id, "lim": limit, "off": offset})).mappings().all()
-        return [dict(r) for r in rows]
+        return _strip_total(list(rows))
 
     async def purchased_amount_since(self, session: AsyncSession, *, account_id: int,
                                      since: datetime) -> int:

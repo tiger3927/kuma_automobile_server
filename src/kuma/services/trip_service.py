@@ -12,6 +12,7 @@ from ..core.pagination import PageParams
 from ..core.scope import Principal
 from ..geo.clean import TrackPoint
 from ..geo.mileage import compute_trip_mileage
+from ..repositories.base import count_of
 from ..repositories.telemetry_repo import TelemetryRepo
 from ..repositories.trip_repo import TripRepo
 
@@ -23,11 +24,14 @@ class TripService:
     async def page(self, session: AsyncSession, principal: Principal, *, vin: str | None = None,
                    status: str | None = None, start: datetime | None = None,
                    end: datetime | None = None, page: PageParams | None = None) -> dict:
+        p = page or PageParams()
         rows = (await session.execute(
-            self.repo.page(principal, vin=vin, status=status, start=start, end=end, page=page)
+            self.repo.page(principal, vin=vin, status=status, start=start, end=end, page=p)
         )).scalars().all()
+        total = await count_of(session, self.repo.filters(principal, vin=vin, status=status,
+                                                          start=start, end=end))
         return {"items": [_trip_dict(t) for t in rows],
-                "limit": (page or PageParams()).limit, "offset": (page or PageParams()).offset}
+                "limit": p.limit, "offset": p.offset, "total": total}
 
     async def detail(self, session: AsyncSession, principal: Principal, trip_id: int) -> dict:
         trip = await self.repo.get(session, trip_id)

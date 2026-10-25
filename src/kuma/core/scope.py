@@ -21,6 +21,7 @@ OrgType = Literal["manufacturer", "dealer", "operator", "government"]
 
 # 资源名（与 §10.1 矩阵行一一对应；新增资源必须同时补矩阵，否则默认拒绝）
 R_SELF = "self"                       # 自己的账号/积分/订单
+R_KYC = "kyc"                         # 实名认证：本人提交、平台审核（买积分/免押的前置）
 R_VEHICLE_LIVE = "vehicle_live"       # 车辆实时状态
 R_VEHICLE_TRACE = "vehicle_trace"     # 轨迹 / 历史 trip
 R_VEHICLE_MASTER = "vehicle_master"   # 车辆主数据（VIN、绑定、T-Box）
@@ -57,6 +58,13 @@ PERMISSIONS: dict[str, dict[IdentityType, set[str]]] = {
     R_SELF: {i: _RW for i in (
         "consumer", "owner", "driver", "dealer_staff", "manufacturer_staff", "operator_staff")}
     | {"regulator": set(), "platform_staff": _R},
+    # 实名认证（`Task-Plan.md` §8.6-24 三档）。`write` = 提交/重提自己的记录；
+    # **`review` 只有平台有**——审核通过会直接抬高 `core.account.kyc_level`，
+    # 而它是买积分（§7.2）与换电免押（§16.7）的闸门，所以 review 进 DUAL_CONTROL。
+    # regulator 只读：监管要能查"这个平台做没做实名"，但不能改等级。
+    R_KYC: {i: _RW for i in (
+        "consumer", "owner", "driver", "dealer_staff", "manufacturer_staff", "operator_staff")}
+    | {"regulator": _R, "platform_staff": _RW | {"review"}},
     R_VEHICLE_LIVE: {
         "owner": _RW, "driver": _R, "dealer_staff": _R, "manufacturer_staff": _R,
         "operator_staff": _R, "regulator": _R, "platform_staff": _R, "consumer": set()},
@@ -119,6 +127,9 @@ PERMISSIONS: dict[str, dict[IdentityType, set[str]]] = {
 # 需要双人授权的高危动作（Task-Plan.md §9.5 / §10.1）
 DUAL_CONTROL: set[tuple[str, str]] = {
     (R_COMMAND, "write"), (R_POINTS_RULE, "write"), (R_PAYOUT_VERIFY, "write"),
+    # 审核通过 = 抬高 kyc_level = 打开"现金买积分"与"免押换电"两道闸门（§7.2 / §16.7）。
+    # 一个人就能改的话，内部账号给自己刷个 2 级就绕过了 §7.4 的整套资金风控。
+    (R_KYC, "review"),
 }
 
 

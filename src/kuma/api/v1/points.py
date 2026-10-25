@@ -58,7 +58,7 @@ async def balance(principal: PrincipalDep, session: Db) -> dict[str, Any]:
 async def ledger(principal: PrincipalDep, session: Db,
                  limit: int = Query(default=50, ge=1, le=200),
                  offset: int = Query(default=0, ge=0)) -> dict[str, Any]:
-    return {"items": await points_svc.ledger(session, principal, limit=limit, offset=offset)}
+    return await points_svc.ledger(session, principal, limit=limit, offset=offset)
 
 
 @router.get("/offset-capacity")
@@ -153,6 +153,23 @@ async def my_purchases(principal: PrincipalDep, session: Db,
                        limit: int = Query(default=50, ge=1, le=200),
                        offset: int = Query(default=0, ge=0)) -> dict[str, Any]:
     return await purchase_svc.my_purchases(session, principal, limit=limit, offset=offset)
+
+
+@router.get("/pay-orders/{pay_no}")
+async def pay_order_detail(pay_no: str, principal: PrincipalDep, session: Db) -> dict[str, Any]:
+    """支付单 + 名下凭证（用户侧看核销进度；被驳回要能看见并重填）。"""
+    return await purchase_svc.pay_order_view(session, principal, pay_no=pay_no)
+
+
+@router.get("/pay-vouchers")
+async def pay_voucher_queue(principal: PrincipalDep, session: Db,
+                            status: str = Query(default="pending"),
+                            region_id: str | None = Query(default=None),
+                            limit: int = Query(default=50, ge=1, le=200),
+                            offset: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    """待核销队列（§9.5 工作台，`payout_verify:read`）。带 `total`，可翻页。"""
+    return await purchase_svc.verify_queue(session, principal, status=status,
+                                           region_id=region_id, limit=limit, offset=offset)
 
 
 @router.post("/pay-orders/{pay_no}/voucher", status_code=201)

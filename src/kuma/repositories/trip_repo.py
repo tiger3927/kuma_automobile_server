@@ -13,9 +13,14 @@ from .base import trip_scope_clause
 
 
 class TripRepo:
-    def page(self, principal: Principal, *, vin: str | None = None,   # 见 vehicle_repo：方法别叫 list
-             status: str | None = None, start: datetime | None = None,
-             end: datetime | None = None, page: PageParams | None = None) -> Select:
+    def filters(self, principal: Principal, *, vin: str | None = None,
+                status: str | None = None, start: datetime | None = None,
+                end: datetime | None = None) -> Select:
+        """**不带 order/limit** 的条件 Select——给 count 用，也供 `page()` 复用。
+
+        拆出来是为了"总数与页内容同一套条件"：以前只有 `page()`，要数总数就得把条件
+        再抄一遍，抄漏一个 where 就是"总数与列表不一致"（`Task-Web.md` §11-5）。
+        """
         stmt = select(Trip)
         clause = trip_scope_clause(principal)
         if clause is not None:
@@ -28,8 +33,14 @@ class TripRepo:
             stmt = stmt.where(Trip.start_ts >= start)
         if end:
             stmt = stmt.where(Trip.start_ts < end)
+        return stmt
+
+    def page(self, principal: Principal, *, vin: str | None = None,   # 见 vehicle_repo：方法别叫 list
+             status: str | None = None, start: datetime | None = None,
+             end: datetime | None = None, page: PageParams | None = None) -> Select:
         p = page or PageParams()
-        return stmt.order_by(Trip.start_ts.desc()).limit(p.limit).offset(p.offset)
+        return self.filters(principal, vin=vin, status=status, start=start, end=end) \
+            .order_by(Trip.start_ts.desc()).limit(p.limit).offset(p.offset)
 
     async def get(self, session, trip_id: int) -> Trip | None:
         return await session.get(Trip, trip_id)

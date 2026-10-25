@@ -47,12 +47,21 @@ def type_public(row: VehicleType) -> dict[str, Any]:
 
 
 def dealer_public(row: Org) -> dict[str, Any]:
-    """`core.org` 目前**没有**地址 / 电话 / 坐标列（Task-DataBase.md §11）——
-    官网要展示门店位置必须走迁移加列，不能在这里拼假数据。"""
-    return {
+    """门店公开信息。地址 / 电话 / 坐标是**迁移 0010 新加的列**（§11-7：之前无列可出，
+    官网只能显示名称 + 国家，也不能在这里拼假数据）。
+
+    **坐标只在两者都有时才出**：只出一个 `lat` 会让前端把这家店画到 (lat, 0)，
+    比不画更糟——用户会以为赤道线上真有个门店。
+    """
+    out: dict[str, Any] = {
         "code": row.code, "name": row.name, "org_type": row.org_type,
         "region_id": row.region_id, "level": row.level,
+        "address": row.address, "phone": row.phone,
     }
+    if row.lat is not None and row.lng is not None:
+        out["lat"] = row.lat
+        out["lng"] = row.lng
+    return out
 
 
 async def _cached(key: str, load: Callable[[], Coroutine[Any, Any, dict[str, Any]]]) -> dict[str, Any]:

@@ -77,9 +77,11 @@ class PointsService:
         }
 
     async def ledger(self, session: AsyncSession, principal: Principal, *, limit: int = 50,
-                     offset: int = 0) -> list[dict[str, Any]]:
+                     offset: int = 0) -> dict[str, Any]:
         principal.require("points", "read")
-        return await self.repo.ledger_of(session, principal.account_id, limit=limit, offset=offset)
+        rows, total = await self.repo.ledger_of(session, principal.account_id,
+                                                limit=limit, offset=offset)
+        return {"items": rows, "total": total, "limit": limit, "offset": offset}
 
     async def offset_capacity(self, session: AsyncSession, principal: Principal, *,
                               biz_line: str, amount: int, currency: str,

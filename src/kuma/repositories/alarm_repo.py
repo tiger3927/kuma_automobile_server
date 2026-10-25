@@ -105,9 +105,9 @@ class AlarmRepo:
         )).all()
         return [(int(r[0]), str(r[1])) for r in rows]
 
-    def page(self, principal: Principal, *, vin: str | None = None,   # 见 vehicle_repo：方法别叫 list
-             status: str | None = None, type_: str | None = None,
-             page: PageParams | None = None) -> Select:
+    def filters(self, principal: Principal, *, vin: str | None = None,
+                status: str | None = None, type_: str | None = None) -> Select:
+        """不带 order/limit 的条件 Select（总数统计与 `page()` 共用，避免条件抄两遍）。"""
         stmt = select(Alarm).where(Alarm.vin.in_(
             select(Vehicle.vin).where(Vehicle.id.in_(vehicle_scope(principal)))
         ))
@@ -117,8 +117,14 @@ class AlarmRepo:
             stmt = stmt.where(Alarm.status == status)
         if type_:
             stmt = stmt.where(Alarm.type == type_)
+        return stmt
+
+    def page(self, principal: Principal, *, vin: str | None = None,   # 见 vehicle_repo：方法别叫 list
+             status: str | None = None, type_: str | None = None,
+             page: PageParams | None = None) -> Select:
         p = page or PageParams()
-        return stmt.order_by(Alarm.ts.desc()).limit(p.limit).offset(p.offset)
+        return self.filters(principal, vin=vin, status=status, type_=type_) \
+            .order_by(Alarm.ts.desc()).limit(p.limit).offset(p.offset)
 
     async def ack(self, session, *, alarm_id: int, account_id: int, note: str | None) -> Alarm | None:
         alarm = await session.get(Alarm, alarm_id)

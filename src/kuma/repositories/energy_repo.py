@@ -717,8 +717,14 @@ class EnergyRepo:
 
     async def list_swaps(self, session: AsyncSession, *, scope_subquery: Any,
                          status: str | None, station_id: int | None,
-                         limit: int, offset: int) -> list[dict[str, Any]]:
-        sql = f"SELECT {SWAP_COLS} FROM energy.swap_order WHERE id IN ({scope_subquery})"
+                         limit: int, offset: int) -> tuple[list[dict[str, Any]], int]:
+        """换电流水 + 总数（`Task-Web.md` §11-5：换电流水页要显示"共 N 条"）。
+
+        `count(*) OVER()` 与行同一快照：换电单在被并发改状态（operator_done →
+        account_done），第二条 count 查询会数到"页内容里没有的那一单"。
+        """
+        sql = (f"SELECT {SWAP_COLS}, count(*) OVER() AS total FROM energy.swap_order "
+               f"WHERE id IN ({scope_subquery})")
         p: dict[str, Any] = {"limit": max(1, min(limit, 200)), "offset": max(0, offset)}
         if status:
             sql += " AND status = :status"
@@ -727,7 +733,13 @@ class EnergyRepo:
             sql += " AND station_id = :sid"
             p["sid"] = station_id
         sql += " ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset"
-        return [dict(r) for r in (await session.execute(text(sql), p)).mappings().all()]
+        items: list[dict[str, Any]] = []
+        total = 0
+        for r in (await session.execute(text(sql), p)).mappings().all():
+            d = dict(r)
+            total = int(d.pop("total"))
+            items.append(d)
+        return items, total
 
     async def append_swap_event(self, session: AsyncSession, *, swap_order_id: int, event: str,
                                 payload: dict[str, Any], actor_account_id: int | None) -> None:

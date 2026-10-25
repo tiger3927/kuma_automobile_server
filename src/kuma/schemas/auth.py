@@ -37,6 +37,23 @@ class OrgCreateIn(BaseModel):
     primary_account_id: int | None = None
 
 
+class OrgContactIn(BaseModel):
+    """改组织名称与联系方式（迁移 0010 给 `core.org` 加了 address/phone/lat/lng）。
+
+    **只碰这几列**：`org_type` / 父子关系 / 主管理员各有自己的流程与权限
+    （`/orgs`、`/orgs/{id}/primary-admin`），混在一个 PATCH 里就等于给
+    `org:write` 开了改组织结构的路。
+    坐标必须**成对**给（只给 lat 会让"附近门店"查询把这家店漏掉或算错）。
+    v1 不支持把坐标清空（传 null = 不改）；文本字段清空传空串。
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    address: str | None = Field(default=None, max_length=300)
+    phone: str | None = Field(default=None, max_length=32)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+
+
 class MemberIn(BaseModel):
     account_id: int
     role: str

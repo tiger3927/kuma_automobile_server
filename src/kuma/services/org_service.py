@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.audit import write_audit
 from ..core.exceptions import Conflict, Forbidden, NotFound, ValidationFailed
 from ..core.scope import Principal
-from ..models.core import Membership, Org
+from ..models.core import Account, Identity, Membership, Org
 from ..repositories.account_repo import AccountRepo
 
 ORG_TYPES = ("manufacturer", "dealer", "operator", "government")
@@ -105,6 +105,68 @@ class OrgService:
         await write_audit(session, actor=principal, action="org.add_member", resource_type="org",
                           resource_id=org_id, after={"account_id": account_id, "role": role}, ip=ip)
         return {"org_id": org_id, "account_id": account_id, "role": role}
+
+    async def update_contact(self, session: AsyncSession, principal: Principal, org_id: int, *,
+                             name: str | None = None, address: str | None = None,
+                             phone: str | None = None, lat: float | None = None,
+                             lng: float | None = None, ip: str | None = None) -> dict:
+        """改名称与联系方式（portal 经销商页要展示地址/电话/坐标，§11-7）。"""
+        principal.require("org", "write")
+        org = await session.get(Org, org_id)
+        if org is None:
+            raise NotFound("org_not_found")
+        # 平台改任何组织；其它身份只能改自己所属的组织（`org:write` 本身不带 scope 收敛）
+        if not principal.is_platform and org_id not in principal.org_ids():
+            raise Forbidden("org_out_of_scope")
+        patch = {"name": name, "address": address, "phone": phone, "lat": lat, "lng": lng}
+        given = {k: v for k, v in patch.items() if v is not None}
+        if not given:
+            raise ValidationFailed("没有要改的字段", code="empty_patch")
+        if (lat is None) != (lng is None):
+            raise ValidationFailed("lat/lng 必须成对给", code="geo_pair")
+        before = {k: getattr(org, k) for k in given}
+        for k, v in given.items():
+            setattr(org, k, v)
+        await session.flush()
+        await write_audit(session, actor=principal, action="org.update_contact",
+                          resource_type="org", resource_id=org_id,
+                          before=before, after=given, ip=ip)
+        return {"org_id": org_id, **{k: getattr(org, k) for k in given}}
+
+    async def members(self, session: AsyncSession, principal: Principal,
+                      org_id: int) -> list[dict]:
+        """组织在职成员（**联审人候选的唯一来源**，`Task-Web.md` §5-6）。
+
+        带上每人**当前有效身份**：双人授权要求联审人是 `platform_staff`
+        （`dual_control.require_co_approver` 会拒非平台身份），前端没有这个字段
+        就只能让人盲填 account_id 然后吃 403。
+        不返回 phone/email——同事之间需要认人，不需要彼此的联系方式。
+        """
+        principal.require("org", "read")
+        org = await session.get(Org, org_id)
+        if org is None:
+            raise NotFound("org_not_found")
+        if not (principal.is_platform or principal.is_regulator
+                or org_id in principal.org_ids()):
+            raise Forbidden("org_out_of_scope")
+        rows = (await session.execute(
+            select(Membership, Account)
+            .join(Account, Account.id == Membership.account_id)
+            .where(Membership.org_id == org_id, Membership.status == "active")
+            .order_by(Membership.role, Account.id)
+        )).all()
+        account_ids = [a.id for _, a in rows]
+        identities: dict[int, list[str]] = {}
+        if account_ids:
+            id_rows = (await session.execute(
+                select(Identity.account_id, Identity.identity_type)
+                .where(Identity.account_id.in_(account_ids), Identity.status == "active")
+            )).all()
+            for acc_id, idt in id_rows:
+                identities.setdefault(acc_id, []).append(idt)
+        return [{"account_id": a.id, "username": a.username, "role": m.role,
+                 "kyc_level": a.kyc_level, "identities": sorted(identities.get(a.id, []))}
+                for m, a in rows]
 
     async def transfer_primary_admin(self, session: AsyncSession, principal: Principal,
                                      org_id: int, new_account_id: int,

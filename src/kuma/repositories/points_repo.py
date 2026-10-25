@@ -153,12 +153,23 @@ class PointsRepo:
         return (await session.execute(text(sql + " LIMIT 1"), p)).scalar() is not None
 
     async def ledger_of(self, session: AsyncSession, account_id: int, *, limit: int = 50,
-                        offset: int = 0) -> list[dict[str, Any]]:
+                        offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        """流水 + 总数（`Task-Web.md` §11-5：积分流水页要显示"共 N 条"）。
+
+        `count(*) OVER()` 而不是第二条 count：流水是**只追加**的表，两条 SQL 之间
+        可能刚落一笔，分开数会出现"总数比页内容新"。窗口函数保证同一快照。
+        """
         rows = (await session.execute(text(f"""
-            SELECT {LEDGER_COLS} FROM mkt.points_ledger
+            SELECT {LEDGER_COLS}, count(*) OVER() AS total FROM mkt.points_ledger
              WHERE account_id = :id ORDER BY created_at DESC, id DESC LIMIT :limit OFFSET :offset
         """), {"id": account_id, "limit": limit, "offset": offset})).mappings().all()
-        return [dict(r) for r in rows]
+        items: list[dict[str, Any]] = []
+        total = 0
+        for r in rows:
+            d = dict(r)
+            total = int(d.pop("total"))
+            items.append(d)
+        return items, total
 
     async def expiring_soon(self, session: AsyncSession, account_id: int, *, days: int = 30
                             ) -> int:

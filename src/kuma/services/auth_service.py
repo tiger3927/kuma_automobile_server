@@ -118,6 +118,10 @@ class AuthService:
     async def whoami(self, session: AsyncSession, principal: Principal) -> dict:
         identities = await self.repo.identities(session, principal.account_id)
         memberships = await self.repo.memberships(session, principal.account_id)
+        # 业务线**不另查库**：`resolve_principal()` 每次请求已从 `core.org_business` 解析出
+        # `principal.orgs[].business_lines`（迁移 0007 起）。这里只把它出到响应——
+        # 换电菜单可见性的正解（`Task-Web.md` §11-4），前端不必再用 403 探测。
+        lines = {o.org_id: o.business_lines for o in principal.orgs}
         return {
             "account_id": principal.account_id,
             "active_identity": principal.active_identity,
@@ -126,6 +130,7 @@ class AuthService:
             "kyc_level": principal.kyc_level,
             "scope": principal.scope_kind(),
             "orgs": [{"org_id": o.id, "org_type": o.org_type, "name": o.name, "code": o.code,
-                      "role": m.role, "level": o.level, "path": o.path}
+                      "role": m.role, "level": o.level, "path": o.path,
+                      "business_lines": sorted(lines.get(o.id, []))}
                      for m, o in memberships],
         }
