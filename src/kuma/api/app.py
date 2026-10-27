@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.responses import ORJSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..core.bus import get_bus
 from ..core.config import Settings, get_settings
@@ -35,11 +36,14 @@ class SPAStaticFiles(StaticFiles):
     """
 
     async def get_response(self, path: str, scope):  # type: ignore[override]
-        # 注意：Starlette 的 StaticFiles 找不到文件时是 **raise HTTPException(404)**，
-        # 不是返回一个 404 响应——所以必须 catch，判 `resp.status_code` 永远不会命中。
+        # 两个坑，都是线上实测出来的：
+        # 1) StaticFiles 找不到文件时是 **raise HTTPException(404)**，不是返回 404 响应
+        #    ——判 `resp.status_code` 永远不会命中，必须 catch。
+        # 2) 它抛的是 **starlette** 的 HTTPException；`fastapi.HTTPException` 是它的**子类**，
+        #    `except fastapi.HTTPException` 抓不到父类实例（线上 /admin/fleet 因此仍 404）。
         try:
             return await super().get_response(path, scope)
-        except HTTPException as exc:
+        except StarletteHTTPException as exc:
             if exc.status_code == 404 and not path.startswith("assets/"):
                 return await super().get_response("index.html", scope)
             raise
