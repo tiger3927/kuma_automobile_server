@@ -11,6 +11,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import ORJSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
+from starlette.types import Scope
 
 from ..core.bus import get_bus
 from ..core.config import Settings, get_settings
@@ -35,7 +37,7 @@ class SPAStaticFiles(StaticFiles):
     回一份 HTML 只会把问题变成"白屏 + JS 语法错"，比 404 更难查。
     """
 
-    async def get_response(self, path: str, scope):  # type: ignore[override]
+    async def get_response(self, path: str, scope: Scope) -> Response:
         # 两个坑，都是线上实测出来的：
         # 1) StaticFiles 找不到文件时是 **raise HTTPException(404)**，不是返回 404 响应
         #    ——判 `resp.status_code` 永远不会命中，必须 catch。
