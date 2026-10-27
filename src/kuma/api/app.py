@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import ORJSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import ORJSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -36,14 +36,7 @@ class SPAStaticFiles(StaticFiles):
     """
 
     async def get_response(self, path: str, scope):  # type: ignore[override]
-        # `/admin`（无尾斜杠）会被 Mount 交过来一个空 path。StaticFiles 对此 **307 到它自己
-        # 拼出来的绝对 URL**，而那个 URL 取的是 uvicorn 的 `scope["server"]`：
-        # 线上实测 `https://kuma.my-gun.top/admin` → `Location: http://127.0.0.1/admin/`，
-        # 浏览器直接被踢出站点（nginx 没传 X-Forwarded-Host，带上了才对）。
-        # 与其依赖反代传头，不如根本不跳——空 path 直接给 index.html。
-        if path in ("", "/"):
-            return await super().get_response("index.html", scope)
-        # 另两个坑，都是线上实测出来的：
+        # 两个坑，都是线上实测出来的：
         # 1) StaticFiles 找不到文件时是 **raise HTTPException(404)**，不是返回 404 响应
         #    ——判 `resp.status_code` 永远不会命中，必须 catch。
         # 2) 它抛的是 **starlette** 的 HTTPException；`fastapi.HTTPException` 是它的**子类**，
@@ -113,6 +106,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 挂在这里而不是改 nginx：nginx 由宝塔管，它的配置注释自己写着
     # "改坏了 443 的 API 一起挂"——静态由后端服务，反代一行都不用动。
     if s.admin_dist and (Path(s.admin_dist) / "index.html").is_file():
+
+        # `/admin`（无尾斜杠）必须自己处理：`Mount` 的正则只匹配 `/admin/...`，所以 `/admin`
+        # 谁都不匹配，落到 Starlette Router 的 redirect_slashes → 307 到它用 `scope["server"]`
+        # 拼出来的**绝对** URL。线上实测 `https://kuma.my-gun.top/admin` 的
+        # `Location: http://127.0.0.1/admin/`，浏览器直接被踢出站点
+        # （nginx 没传 X-Forwarded-Host，手动带上才拼对）。
+        # 这里给**相对** Location，浏览器按当前 origin 解析，就不依赖反代传什么头。
+        async def admin_root(_request: Request) -> RedirectResponse:
+            return RedirectResponse("/admin/", status_code=302)
+
+        app.add_route("/admin", admin_root, methods=["GET"])
         app.mount("/admin", SPAStaticFiles(directory=s.admin_dist, html=True), name="admin")
 
     return app
