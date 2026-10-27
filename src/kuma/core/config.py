@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     api_port: int = Field(8100, alias="KUMA_API_PORT")
     gateway_health_port: int = Field(8101, alias="KUMA_GATEWAY_HEALTH_PORT")
     worker_health_port: int = Field(8102, alias="KUMA_WORKER_HEALTH_PORT")
+    # 前端产物目录（`web/admin` 的 build 结果，`base: "/admin/"`）。空或目录不存在 = 不挂静态，
+    # 本机开发走 vite dev（5173 把 /api 代理到线上）。生产指仓库外的目录，
+    # 因为 `web/` 不进 git、产物是传上去的，不能让 dist 混进版本库。
+    admin_dist: str = Field("", alias="KUMA_ADMIN_DIST")
 
     # PostgreSQL
     dsn: str = Field("postgresql+asyncpg://kuma_app@127.0.0.1:5432/kuma", alias="KUMA_DSN")
