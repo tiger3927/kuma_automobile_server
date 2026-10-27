@@ -36,7 +36,14 @@ class SPAStaticFiles(StaticFiles):
     """
 
     async def get_response(self, path: str, scope):  # type: ignore[override]
-        # 两个坑，都是线上实测出来的：
+        # `/admin`（无尾斜杠）会被 Mount 交过来一个空 path。StaticFiles 对此 **307 到它自己
+        # 拼出来的绝对 URL**，而那个 URL 取的是 uvicorn 的 `scope["server"]`：
+        # 线上实测 `https://kuma.my-gun.top/admin` → `Location: http://127.0.0.1/admin/`，
+        # 浏览器直接被踢出站点（nginx 没传 X-Forwarded-Host，带上了才对）。
+        # 与其依赖反代传头，不如根本不跳——空 path 直接给 index.html。
+        if path in ("", "/"):
+            return await super().get_response("index.html", scope)
+        # 另两个坑，都是线上实测出来的：
         # 1) StaticFiles 找不到文件时是 **raise HTTPException(404)**，不是返回 404 响应
         #    ——判 `resp.status_code` 永远不会命中，必须 catch。
         # 2) 它抛的是 **starlette** 的 HTTPException；`fastapi.HTTPException` 是它的**子类**，
