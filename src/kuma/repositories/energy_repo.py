@@ -917,11 +917,14 @@ class EnergyRepo:
     # ══ 押金三问（负债报表，不进收入）════════════════════════════════════
     async def deposit_position(self, session: AsyncSession,
                                operator_org_ids: list[int] | None) -> list[dict[str, Any]]:
+        # `SUM(bigint)` 在 PG 里升成 **numeric**，asyncpg → Decimal，而全局 ORJSON
+        # 序列化 Decimal 出来的不是整数（线上实测 `"5E+4"`），前端 `formatMoney`
+        # 按"最小货币单位整数"解析会直接抛错。金额本来就是 bigint，回 cast 回来。
         sql = ("SELECT operator_org_id, currency, COUNT(*) AS deposit_rows, "
-               "COALESCE(SUM(amount) FILTER (WHERE collected_at IS NOT NULL), 0) AS collected, "
-               "COALESCE(SUM(amount) FILTER (WHERE status = 'refunded'), 0)   AS refunded, "
-               "COALESCE(SUM(amount) FILTER (WHERE status IN ('open','held')), 0) AS held_now, "
-               "COALESCE(SUM(amount) FILTER (WHERE status = 'forfeited'), 0)  AS forfeited "
+               "COALESCE(SUM(amount) FILTER (WHERE collected_at IS NOT NULL), 0)::bigint AS collected, "
+               "COALESCE(SUM(amount) FILTER (WHERE status = 'refunded'), 0)::bigint   AS refunded, "
+               "COALESCE(SUM(amount) FILTER (WHERE status IN ('open','held')), 0)::bigint AS held_now, "
+               "COALESCE(SUM(amount) FILTER (WHERE status = 'forfeited'), 0)::bigint  AS forfeited "
                "FROM energy.deposit_ledger WHERE true")
         p: dict[str, Any] = {}
         if operator_org_ids is not None:
