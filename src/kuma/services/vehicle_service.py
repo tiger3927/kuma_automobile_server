@@ -9,7 +9,8 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.audit import write_audit
@@ -20,6 +21,7 @@ from ..core.scope import Principal
 from ..core.security import ahash_password
 from ..models.core import (
     Device,
+    Identity,
     OwnershipTransfer,
     Sim,
     Subscription,
@@ -350,11 +352,23 @@ class VehicleService:
         vehicle.owner_type, vehicle.owner_account_id, vehicle.owner_org_id = (
             to_type, to_account_id, to_org_id)
         await session.flush()
+
+        # **过户必须同事务给受让账号发 `owner` 身份**（`Task-Server.md` §18.8）。
+        # 不发就是"提了车看不到车"：`repositories/base.py:31` 的车辆可见性以
+        # `"owner" in principal.identities` 为闸门，注册只发 `consumer`
+        # （`auth_service.py:23-24`），而 `consumer` 在 `R_VEHICLE_LIVE` 上是空集
+        # （`scope.py:70`）——`GET /vehicles` 空列表、WS 连不上。
+        # 过户到 org（运营商/经销商车队）不发：org 侧靠 Membership + org scope 看得见。
+        granted: str | None = None
+        if to_type == "account" and to_account_id:
+            granted = await self._grant_owner_identity(session, int(to_account_id))
+
         await write_audit(session, actor=principal, action="vehicle.transfer",
                           resource_type="vehicle", resource_id=vin,
                           before=before_owner,
                           after={"to_type": to_type, "to_account_id": to_account_id,
-                                 "to_org_id": to_org_id, "released_contracts": released}, ip=ip)
+                                 "to_org_id": to_org_id, "released_contracts": released,
+                                 "owner_identity": granted}, ip=ip)
         # 双方都要收到：原主失去车辆、新主获得车辆（WS 列表立刻刷新，不靠轮询）
         await emit(session, aggregate_type="vehicle", aggregate_id=vehicle.id,
                    event_type="ownership",
@@ -362,7 +376,47 @@ class VehicleService:
                             "to_account": to_account_id,
                             "accounts": [a for a in (before_owner["owner_account_id"],
                                                      to_account_id) if a]})
-        return {"vin": vin, "released_contracts": released}
+        return {"vin": vin, "released_contracts": released, "owner_identity": granted}
+
+    async def _grant_owner_identity(self, session: AsyncSession, account_id: int) -> str:
+        """给账号补 `owner` 身份，返回 `created` / `already_active` / `reactivated`。
+
+        三条都要处理，缺任何一条都会在真机上出现"过户成功但车主看不见车"：
+
+        - **没有行** → 插入。`uq_identity(account_id, identity_type)`
+          （`models/core.py:132`）让重复授予天然幂等，所以不需要先查后插。
+        - **已有 active 行** → 什么都不做（第二次过户、或本来就有多台车）。
+        - **有行但 status≠active** → **必须复活**。`resolve_principal` 只取
+          `Identity.status == 'active'`（`core/deps.py:44`），留着 revoked 行
+          等于"过户成功、身份在，但解析不到"——最难查的一种瞎法。
+          这里只复活 `owner` 这一种身份，不碰 driver / dealer_staff：
+          那些是审核与组织流程授予的能力，撤销它们有别的含义。
+
+        **不撤销原主的 `owner` 身份**：身份是"能看自己名下车辆"的能力，不是所有权；
+        原主可能还有别的车，撤销会把他那些车一起弄瞎。
+        """
+        inserted = (await session.execute(
+            pg_insert(Identity)
+            .values(account_id=account_id, identity_type="owner")
+            .on_conflict_do_nothing(index_elements=["account_id", "identity_type"])
+            .returning(Identity.id)
+        )).first()
+        if inserted is not None:
+            await session.flush()
+            return "created"
+
+        status = (await session.execute(
+            select(Identity.status).where(Identity.account_id == account_id,
+                                          Identity.identity_type == "owner")
+        )).scalar()
+        if status == "active":
+            return "already_active"
+        await session.execute(
+            update(Identity)
+            .where(Identity.account_id == account_id, Identity.identity_type == "owner")
+            .values(status="active"))
+        await session.flush()
+        return "reactivated"
 
     async def breakdown(self, session: AsyncSession, principal: Principal) -> list[dict]:
         return await self.repo.status_breakdown(session, principal)

@@ -70,7 +70,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lambda a: lifespan(a, s, on_startup=_startup, on_shutdown=_shutdown),
     )
     app.add_middleware(RequestContext)
-    app.add_middleware(RateLimit, rules={"/api/v1/public/": 120})
+    # 规则按**插入顺序取第一个前缀匹配**（`core/middleware.py:48` 的 `next(...)`），
+    # 所以更具体的 `/api/v1/public/leads` 必须排在 `/api/v1/public/` **前面**，否则 10/min 永不生效。
+    # 公开**写**端点要比公开读端点严：120/min/IP 对意向表单的刷量太松（`Task-Server.md` §18.3）。
+    app.add_middleware(RateLimit, rules={"/api/v1/public/leads": 10, "/api/v1/public/": 120})
     register_handlers(app)
 
     app.include_router(api_router, prefix="/api/v1")
@@ -120,5 +123,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.add_route("/admin", admin_root, methods=["GET"])
         app.mount("/admin", SPAStaticFiles(directory=s.admin_dist, html=True), name="admin")
+
+    # ── 用户端 guest（`web/guest` 的 build 结果，`base: "/app/"`）───────────────
+    # 必须排在 portal 的 `/` **之前**：Starlette 按注册顺序匹配，portal 是兜底。
+    # 顺序错了 `/app/xxx` 会被 portal 接住，而 portal 的路由把未知路径 redirect 回 `/`
+    # （`web/portal/src/main.ts` 的 catch-all）——线上表象是"访问 /app 被弹回官网首页"。
+    # `/app`（无尾斜杠）那个坑与 `/admin` 完全同构，见上面 `admin_root` 的注释。
+    if s.guest_dist and (Path(s.guest_dist) / "index.html").is_file():
+
+        async def guest_root(_request: Request) -> RedirectResponse:
+            return RedirectResponse("/app/", status_code=302)
+
+        app.add_route("/app", guest_root, methods=["GET"])
+        app.mount("/app", SPAStaticFiles(directory=s.guest_dist, html=True), name="guest")
+
+    # ── 官网 portal（`web/portal` 的 build 结果，`base: "/"`）──────────────────
+    # 同样"缺产物就不挂"。挂 "/" 必须放**最后**：Starlette 按注册顺序匹配，
+    # /api/v1、/admin、/app、/internal、/healthz、/metrics 先命中，其余才落 portal；
+    # 深链刷新由 SPAStaticFiles 回 index.html（portal 自身路由再把未知路径 redirect "/"）。
+    if s.portal_dist and (Path(s.portal_dist) / "index.html").is_file():
+        app.mount("/", SPAStaticFiles(directory=s.portal_dist, html=True), name="portal")
 
     return app

@@ -1,8 +1,12 @@
-"""`commerce` schema：**本轮只映射积分包购买链路要用的五张**（`Task-DataBase.md` §11.2 / 口径 §5.1）。
+"""`commerce` schema：映射**积分包购买链路的五张** + **潜客意向 `lead`**（`Task-DataBase.md` §11.2 / 口径 §5.1）。
 
-`commerce` 12 张表里其余（`vehicle_listing` / `stock` / `cart_item` / `order_deposit` /
+`commerce` 其余表（`vehicle_listing` / `stock` / `cart_item` / `order_deposit` /
 `aftersale` / `used_car_report` / `product_review`）尚无写入方，故意不映射——
 映射了没有写入路径的表只会诱导出"看起来已实现"的假接口（`Task-Server.md` §16 C10 同一立场）。
+
+`lead` 不在 §11.2 的原始 12 张表里，是 2026-10-29 为 guest 角色 A（潜在客户）新增的
+（`Task-Server.md` §18.3，DDL 见迁移 `0012`）：官网/用户端的意向登记要落到一张能被经销商
+跟进的表，否则"潜在客户"只是收集表单垃圾。
 
 **为什么积分包非要走这套骨架**（§5.1 自洽要点 2）：现金买积分必须走同一订单、同一支付核销、
 同一退款规则、同一发票口径。否则"现金换积分"就成了一条游离在财务与合规之外的旁路——
@@ -150,3 +154,41 @@ class PaymentChannel(Base):
     config_version: Mapped[int] = mapped_column(SmallInteger, nullable=False,
                                                 server_default=text("1"))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'off'"))
+
+
+class Lead(Base):
+    """潜客意向（`Task-Plan.md` §9.1 角色 A / `Task-Server.md` §18.3）。
+
+    **`account_id` 可空是有意的**：portal 官网在登录前就要能收意向，否则"未登录的潜在客户"
+    这一阶段没有落点。但库里 `CHECK (account_id IS NOT NULL OR contact_phone IS NOT NULL)`
+    保证每条线索至少有一个可归因 / 可回访的标识——两者皆空的行既无法跟进也无法统计转化，
+    不如在入口就拒掉。
+
+    状态 `new → contacted → visited → won → lost` 由**经销商**改（`lead:write`），
+    用户侧只能看自己的；`assigned_dealer_org_id` 是分派结果，与用户自选的
+    `intent_dealer_org_id` 分开存——自选可能是"我想去这家店"，分派是"系统/平台给派给谁"，
+    两者不一致是常态（就近但没授权、或用户指定但没库存），混成一个字段就看不出差异。
+    """
+
+    __tablename__ = "lead"
+    __table_args__ = {"schema": "commerce"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    lead_no: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    account_id: Mapped[int | None] = mapped_column(BigInteger)
+    region_id: Mapped[str] = mapped_column(CHAR(2), nullable=False)
+    contact_name: Mapped[str] = mapped_column(Text, nullable=False)
+    contact_phone: Mapped[str | None] = mapped_column(Text)
+    intent_type_code: Mapped[str | None] = mapped_column(Text)
+    intent_dealer_org_id: Mapped[int | None] = mapped_column(BigInteger)
+    assigned_dealer_org_id: Mapped[int | None] = mapped_column(BigInteger)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'portal'"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'new'"))
+    followed_by: Mapped[int | None] = mapped_column(BigInteger)
+    note: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False,
+                                          server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))

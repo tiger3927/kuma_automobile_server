@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # 本机开发走 vite dev（5173 把 /api 代理到线上）。生产用仓库内的 `web/admin/dist`：
     # `web/` 不进 git、产物是传上去的，靠 `.gitignore` 的 `dist/` 保证它不被跟踪。
     admin_dist: str = Field("", alias="KUMA_ADMIN_DIST")
+    # 用户端 guest 产物目录（`web/guest` 的 build 结果，`base: "/app/"`），挂到 `/app`。
+    # 必须排在 portal 之前挂载：Starlette 按注册顺序匹配，portal 的 `/` 是兜底（`api/app.py`）。
+    guest_dist: str = Field("", alias="KUMA_GUEST_DIST")
+    # 官网 portal 产物目录（`web/portal` 的 build 结果，`base: "/"`），挂到 "/" 作兜底。
+    portal_dist: str = Field("", alias="KUMA_PORTAL_DIST")
 
     # PostgreSQL
     dsn: str = Field("postgresql+asyncpg://kuma_app@127.0.0.1:5432/kuma", alias="KUMA_DSN")

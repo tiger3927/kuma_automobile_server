@@ -26,6 +26,7 @@ R_VEHICLE_LIVE = "vehicle_live"       # 车辆实时状态
 R_VEHICLE_TRACE = "vehicle_trace"     # 轨迹 / 历史 trip
 R_VEHICLE_MASTER = "vehicle_master"   # 车辆主数据（VIN、绑定、T-Box）
 R_COMMAND = "command_down"            # 下行控制
+R_LEAD = "lead"                       # 潜客意向（§9.1 角色 A）：本人登记、经销商跟进
 R_PRODUCT = "product"
 R_ORDER = "order"
 R_PAYMENT = "payment"                 # 发起 + 回填转账凭证
@@ -78,6 +79,13 @@ PERMISSIONS: dict[str, dict[IdentityType, set[str]]] = {
         "owner": _RW, "driver": _RW, "operator_staff": _RW,
         "platform_staff": _RW,   # 双人授权（dual control）
     },
+    # 潜客意向（`Task-Plan.md` §9.1 角色 A / `Task-Server.md` §18.3）。
+    # 三个入口共用这张表：portal 未登录（**无 principal，走 /public/leads，不吃这张矩阵**，
+    # 靠中间件限流 + 库级去重）、注册用户自助（`lead:write` 只看自己的）、
+    # 经销商跟进（`lead:write` 只看**分派到自家**的，scope 在 `repositories/lead_repo.py` 兜）。
+    # 平台给 _RW 是为了客服代录与重新分派；**regulator 不给**——线索含姓名电话，不是监管对象。
+    R_LEAD: {"consumer": _RW, "owner": _RW, "driver": _RW, "dealer_staff": _RW,
+             "platform_staff": _RW},
     R_PRODUCT: {
         "consumer": _R, "owner": _R, "driver": _R,
         "dealer_staff": _RW, "manufacturer_staff": _RW, "platform_staff": {"review"}},
