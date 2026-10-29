@@ -190,7 +190,7 @@ class SwapService:
         order = await self.repo.insert_swap(session, swap={
             "swap_no": swap_no, "station_id": station["id"],
             "operator_org_id": station["org_id"], "lease_id": lease["id"],
-            "account_id": principal.account_id, "vin": body.vin,
+            "account_id": self._beneficiary(vehicle, principal), "vin": body.vin,
             "model_code": model["model_code"],
             "out_battery_sn": body.out_battery_sn, "in_battery_sn": body.in_battery_sn,
             "price_rule_id": price["id"], "pricing": pricing,
@@ -374,6 +374,19 @@ class SwapService:
             return
         assert_vehicle_visible(principal, vehicle)
 
+    @staticmethod
+    def _beneficiary(vehicle: Vehicle, principal: Principal) -> int:
+        """`swap_order.account_id` 记**车主（计费与受益人）**，不是发起人。
+
+        站点作业台是站内人员代刷卡：发起人是员工/平台账号，但
+        ① 车主在自己的用户端必须看得见这笔换电（`swap_scope` 只按 `account_id` 收敛）；
+        ② 返积分与免费重换退回都按 `account_id` 记账（`points_service.award/refund`），
+           记成员工就是给员工发积分。
+        发起人另有两处：`energy.swap_event.actor_account_id` 与 `audit` 的 actor。
+        资产车（`owner_type='org'`）没有对应 account，退化为发起人。
+        """
+        return vehicle.owner_account_id or principal.account_id
+
     async def _resolve_lease(self, session: AsyncSession, vehicle: Vehicle,
                              station: dict[str, Any]) -> dict[str, Any] | None:
         """协议按**车的归属**解析（车会过户、司机会换车，§16.6）。"""
@@ -408,7 +421,7 @@ class SwapService:
                 "swap_no": self._swap_no(station["code"]),
                 "station_id": station["id"], "operator_org_id": station["org_id"],
                 "lease_id": lease["id"] if lease else None,
-                "account_id": principal.account_id, "vin": body.vin,
+                "account_id": self._beneficiary(vehicle, principal), "vin": body.vin,
                 "out_battery_sn": body.out_battery_sn, "in_battery_sn": body.in_battery_sn,
                 "amount": 0, "cash_amount": 0, "points_offset": 0,
                 "status": "rejected", "reject_reason": reason,
