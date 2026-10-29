@@ -22,7 +22,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -67,6 +67,19 @@ class SwapService:
         if vehicle is None:
             raise NotFound("vehicle_not_found")
         self._assert_can_operate(principal, vehicle, station)
+
+        # 并发串行化：同一辆车 / 同一块电池的换电必须排队。
+        # 没有它，两笔并发会一起走到 `uq_binding_active`，输的那笔要落拒单得另开事务，
+        # 而外层事务这时还握着电池与绑定的行锁 → 拒单 INSERT 等锁到 statement_timeout
+        # （集成测试实测 `test_concurrent_swap_on_same_battery_one_wins`）。
+        # `pg_advisory_xact_lock` 是事务级的，随事务结束自动释放；三把锁按 key 排序后依次取，
+        # 两笔互相等对方的情况不会出现。拿到锁之后再读绑定，输的那笔会走回正常的
+        # `binding_mismatch` 拒单路径（那时对手已提交，独立事务无锁冲突）。
+        for key in sorted({f"swap:vin:{body.vin}",
+                           f"swap:bat:{body.out_battery_sn}",
+                           f"swap:bat:{body.in_battery_sn}"}):
+            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                                  {"k": key})
 
         # ② 两块电池必须在台账里（查不到 = 池外电池，直接拒，不"先放着"）
         out_b = await self.repo.get_battery(session, body.out_battery_sn)
