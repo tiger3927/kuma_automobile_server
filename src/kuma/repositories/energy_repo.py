@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 MODEL_COLS = """
@@ -856,9 +857,18 @@ class EnergyRepo:
 
         `count(*) OVER()` 与行同一快照：换电单在被并发改状态（operator_done →
         account_done），第二条 count 查询会数到"页内容里没有的那一单"。
+
+        **必须 `literal_binds` 编译，不能 f-string 拼 `Select`**：`swap_scope()` 里的
+        `operator_org_id.in_([...])` 是 SQLAlchemy 的 postcompile 参数，
+        `f"{select}"` 只会渲染出 `IN (__[POSTCOMPILE_operator_org_id_1])` 并把参数丢掉，
+        到 asyncpg 就是一个必然报错的 SQL（线上实测 `column "__" does not exist`，
+        `/energy/swaps` 因此一直 500）。scope 里只有内部的 int / 常量，字面量化无注入面。
         """
+        dialect = postgresql.dialect()
+        scope_sql = str(scope_subquery.compile(
+            dialect=dialect, compile_kwargs={"literal_binds": True}))
         sql = (f"SELECT {SWAP_COLS}, count(*) OVER() AS total FROM energy.swap_order "
-               f"WHERE id IN ({scope_subquery})")
+               f"WHERE id IN ({scope_sql})")
         p: dict[str, Any] = {"limit": max(1, min(limit, 200)), "offset": max(0, offset)}
         if status:
             sql += " AND status = :status"
