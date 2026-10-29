@@ -87,6 +87,33 @@ async def set_model_status(model_code: str, body: BatteryModelStatusIn, request:
 
 
 # ══ 价目与押金规则（运营商申报 → 平台审核）═══════════════════════════════
+@router.get("/prices")
+async def list_prices(principal: PrincipalDep, session: Db,
+                      status: str | None = Query(default=None),
+                      model_code: str | None = Query(default=None),
+                      region_id: str | None = Query(default=None),
+                      station_org_id: int | None = Query(default=None),
+                      limit: int = Query(default=50, ge=1, le=200),
+                      offset: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    """价目规则翻页（带 `total`）。审核工作台必须先看得见 pending_review 的申报。"""
+    return await models_svc.page_prices(session, principal, status=status,
+                                        model_code=model_code, region_id=region_id,
+                                        station_org_id=station_org_id,
+                                        limit=limit, offset=offset)
+
+
+@router.get("/deposit-rules")
+async def list_deposit_rules(principal: PrincipalDep, session: Db,
+                             status: str | None = Query(default=None),
+                             model_code: str | None = Query(default=None),
+                             region_id: str | None = Query(default=None),
+                             limit: int = Query(default=50, ge=1, le=200),
+                             offset: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    return await models_svc.page_deposit_rules(session, principal, status=status,
+                                               model_code=model_code, region_id=region_id,
+                                               limit=limit, offset=offset)
+
+
 @router.post("/prices", status_code=201)
 async def propose_price(body: SwapPriceIn, request: Request, principal: PrincipalDep,
                         session: Db) -> dict[str, Any]:
@@ -199,6 +226,18 @@ async def set_battery_status(battery_sn: str, body: BatteryStatusIn, request: Re
 
 
 # ══ 换电协议与押金 ════════════════════════════════════════════════════════
+@router.get("/leases")
+async def list_leases(principal: PrincipalDep, session: Db,
+                      status: str | None = Query(default=None),
+                      model_code: str | None = Query(default=None),
+                      operator_org_id: int | None = Query(default=None),
+                      limit: int = Query(default=50, ge=1, le=200),
+                      offset: int = Query(default=0, ge=0)) -> dict[str, Any]:
+    """协议翻页（带 `total`）。可见性与 `GET /leases/{id}` 同口径。"""
+    return await leases_svc.page(session, principal, status=status, model_code=model_code,
+                                 operator_org_id=operator_org_id, limit=limit, offset=offset)
+
+
 @router.post("/leases", status_code=201)
 async def create_lease(body: LeaseIn, request: Request, principal: PrincipalDep,
                        session: Db) -> dict[str, Any]:

@@ -62,6 +62,17 @@ DEPOSIT_COLS = """
     refund_voucher_no, forfeit_reason, forfeit_swap_order_id, created_at, updated_at
 """
 
+#: 规则表没有 updated_at / approved_at（`0007` 只给了 created_at），别照 MODEL_COLS 抄
+PRICE_COLS = """
+    id, model_code, region_id, station_org_id, price, currency, min_soc_pct, version,
+    effective_from, effective_to, status, proposed_by, approved_by, created_at
+"""
+
+RULE_COLS = """
+    id, model_code, region_id, amount, currency, waiver_min_kyc, version,
+    effective_from, effective_to, status, proposed_by, approved_by, created_at
+"""
+
 
 # "参数没传"与"传了 None"必须能区分：station_id=None 是"电池离站"（置 NULL），
 # 不传才是"位置不动"。用 None 当默认值会把两者混成一个，导致换电后电池位置丢失。
@@ -697,6 +708,87 @@ class EnergyRepo:
         ).mappings().one_or_none()
         await session.flush()
         return dict(row) if row else None
+
+    async def list_prices(self, session: AsyncSession, *, status: str | None = None,
+                          model_code: str | None = None, region_id: str | None = None,
+                          station_org_id: int | None = None, limit: int = 50,
+                          offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        """价目规则列表（申报/审核页用）。`count(*) OVER ()` 一次拿 total，无二次查询。"""
+        return await self._page_rules(
+            session, "energy.swap_price", PRICE_COLS, status=status, model_code=model_code,
+            region_id=region_id, station_org_id=station_org_id, limit=limit, offset=offset)
+
+    async def list_rules(self, session: AsyncSession, *, status: str | None = None,
+                         model_code: str | None = None, region_id: str | None = None,
+                         limit: int = 50,
+                         offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        """押金规则列表（同上）。表中没有运营商列，可见性在 service 侧统一放行。"""
+        return await self._page_rules(
+            session, "energy.deposit_rule", RULE_COLS, status=status, model_code=model_code,
+            region_id=region_id, station_org_id=None, limit=limit, offset=offset)
+
+    async def _page_rules(self, session: AsyncSession, table: str, cols: str, *,
+                          status: str | None, model_code: str | None, region_id: str | None,
+                          station_org_id: int | None, limit: int,
+                          offset: int) -> tuple[list[dict[str, Any]], int]:
+        if table not in ("energy.swap_price", "energy.deposit_rule"):
+            raise ValueError(f"未知规则表 {table}")
+        sql = [f"SELECT {cols}, count(*) OVER () AS _total FROM {table} WHERE TRUE"]
+        p: dict[str, Any] = {}
+        if status:
+            sql.append("AND status = :status")
+            p["status"] = status
+        if model_code:
+            sql.append("AND model_code = :mc")
+            p["mc"] = model_code
+        if region_id:
+            sql.append("AND region_id = :region")
+            p["region"] = region_id
+        if station_org_id is not None and table == "energy.swap_price":
+            sql.append("AND station_org_id = :org")
+            p["org"] = station_org_id
+        sql.append("ORDER BY id DESC LIMIT :limit OFFSET :offset")
+        p.update({"limit": limit, "offset": offset})
+        rows = (await session.execute(text(" ".join(sql)), p)).mappings().all()
+        total = int(rows[0]["_total"]) if rows else 0
+        return ([{k: v for k, v in dict(r).items() if k != "_total"} for r in rows], total)
+
+    async def list_leases(self, session: AsyncSession, *, status: str | None = None,
+                          model_code: str | None = None, operator_org_id: int | None = None,
+                          account_id: int, org_ids: list[int], swap_orgs: list[int],
+                          full_scope: bool, limit: int = 50,
+                          offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        """协议列表。可见性与 `LeaseService._assert_readable` 同口径：
+
+        平台/监管全量；其他 = 自己是持有人 ∪ 自己组织的协议 ∪ 自己运营的站所属 org 的协议。
+        """
+        sql = [f"SELECT {LEASE_COLS}, count(*) OVER () AS _total "
+               "FROM energy.battery_lease WHERE TRUE"]
+        p: dict[str, Any] = {}
+        if status:
+            sql.append("AND status = :status")
+            p["status"] = status
+        if model_code:
+            sql.append("AND model_code = :mc")
+            p["mc"] = model_code
+        if operator_org_id is not None:
+            sql.append("AND operator_org_id = :op")
+            p["op"] = operator_org_id
+        if not full_scope:
+            conds = ["holder_account_id = :me"]
+            p["me"] = account_id
+            if org_ids:
+                conds.append("holder_org_id = ANY(:holder_orgs)")
+                p["holder_orgs"] = list(org_ids)
+            if swap_orgs:
+                conds.append("operator_org_id = ANY(:swap_orgs)")
+                p["swap_orgs"] = list(swap_orgs)
+            sql.append("AND (" + " OR ".join(conds) + ")")
+        sql.append("ORDER BY id DESC LIMIT :limit OFFSET :offset")
+        p.update({"limit": limit, "offset": offset})
+        rows = (await session.execute(text(" ".join(sql)), p)).mappings().all()
+        total = int(rows[0]["_total"]) if rows else 0
+        return ([{k: v for k, v in dict(r).items() if k != "_total"} for r in rows], total)
 
     # ══ 换电单 ═════════════════════════════════════════════════════════════
     async def find_swap(self, session: AsyncSession, *, swap_id: int | None = None,

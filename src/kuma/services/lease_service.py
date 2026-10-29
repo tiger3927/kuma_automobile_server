@@ -190,6 +190,23 @@ class LeaseService:
                             "deposit_status": (deposit_out or {}).get("status")})
         return {"lease": row, "deposit": deposit_out}
 
+    async def page(self, session: AsyncSession, principal: Principal, *,
+                   status: str | None = None, model_code: str | None = None,
+                   operator_org_id: int | None = None, limit: int = 50,
+                   offset: int = 0) -> dict[str, Any]:
+        """协议翻页（带 `total`）：运营商的"协议与押金"工作台要能列出来才能登记押金。
+
+        可见性与 `_assert_readable` **同一口径**（列表与单条不能不一致，否则能看见却打不开）。
+        """
+        principal.require("swap_lease", "read")
+        items, total = await self.repo.list_leases(
+            session, status=status, model_code=model_code, operator_org_id=operator_org_id,
+            account_id=principal.account_id, org_ids=principal.org_ids(),
+            swap_orgs=principal.org_ids_for_line("swap_operator"),
+            full_scope=principal.is_platform or principal.is_regulator,
+            limit=limit, offset=offset)
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
     async def detail(self, session: AsyncSession, principal: Principal,
                      lease_id: int) -> dict[str, Any]:
         lease = await self.repo.get_lease(session, lease_id)

@@ -179,6 +179,34 @@ class BatteryModelService:
                           before=None, after={"status": row["status"], "note": body.note}, ip=ip)
         return row
 
+    # ══ 规则列表（申报页与平台审核工作台都要看得见"有哪些规则"）═══════════
+    async def page_prices(self, session: AsyncSession, principal: Principal, *,
+                          status: str | None = None, model_code: str | None = None,
+                          region_id: str | None = None, station_org_id: int | None = None,
+                          limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        """价目规则翻页（带 `total`）。
+
+        可见性：**不做 org 收敛**。价目与押金规则是"用户要交多少钱"的公开口径
+        （`rep.swap_price_active` 也是对所有角色开放的），藏起来只会让车主算不出账；
+        真正受控的是**申报**（`deposit:write` + 必须挂自己的换电 org）与**审核**（平台）。
+        """
+        principal.require("deposit", "read")
+        items, total = await self.repo.list_prices(
+            session, status=status, model_code=model_code, region_id=region_id,
+            station_org_id=station_org_id, limit=limit, offset=offset)
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+    async def page_deposit_rules(self, session: AsyncSession, principal: Principal, *,
+                                 status: str | None = None, model_code: str | None = None,
+                                 region_id: str | None = None, limit: int = 50,
+                                 offset: int = 0) -> dict[str, Any]:
+        """押金规则翻页（带 `total`），可见性同 `page_prices`。"""
+        principal.require("deposit", "read")
+        items, total = await self.repo.list_rules(
+            session, status=status, model_code=model_code, region_id=region_id,
+            limit=limit, offset=offset)
+        return {"items": items, "total": total, "limit": limit, "offset": offset}
+
     # ══ 业务线与牌照（换电 scope 的唯一入口）══════════════════════════════
     async def declare_business(self, session: AsyncSession, principal: Principal,
                                body: OrgBusinessIn, *, ip: str | None = None) -> dict[str, Any]:
