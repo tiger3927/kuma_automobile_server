@@ -110,6 +110,13 @@ class LeadService:
                                detail={"lead_no": dup["lead_no"],
                                        "created_at": str(dup["created_at"])})
 
+        # 车型必须存在：不查就是原始 FK 违规（23503）→ 全局处理器只能给笼统的
+        # `reference_not_found`，而 `POST /public/leads` 无鉴权、表单填错车型码是常态。
+        if intent_type_code and not await self.repo.vehicle_type_exists(
+                session, intent_type_code):
+            raise ValidationFailed("意向车型不存在", code="lead_type_unknown",
+                                   detail={"intent_type_code": intent_type_code})
+
         assigned = await self._assign(session, region_id=region_id,
                                       intent_dealer_org_id=intent_dealer_org_id,
                                       context=context)

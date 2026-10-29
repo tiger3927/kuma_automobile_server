@@ -161,6 +161,18 @@ class LeadRepo:
             "SELECT region_id FROM core.account WHERE id = :id"
         ), {"id": account_id})).scalar()
 
+    async def vehicle_type_exists(self, session: AsyncSession, type_code: str) -> bool:
+        """车型是否存在（`core.vehicle_type.type_code`）。
+
+        **只判存在、不判 status**：对一款已下架的车表达意向是合理的（等复产、买二手），
+        拒掉它只会让用户在表单里乱填一个还在售的码。FK 本身也会挡，但那是原始
+        `IntegrityError` → 全局处理器只能给笼统的 `reference_not_found`；
+        公开端点无鉴权、表单填错车型码是常态，所以在这里提前给明确业务码。
+        """
+        return bool((await session.execute(text(
+            "SELECT 1 FROM core.vehicle_type WHERE type_code = :c"
+        ), {"c": type_code})).scalar())
+
     async def active_dealer(self, session: AsyncSession, org_id: int) -> dict[str, Any] | None:
         """这个 org 是不是**在职经销商**（分派目标必须是，否则线索进黑洞）。"""
         row = (await session.execute(text("""
