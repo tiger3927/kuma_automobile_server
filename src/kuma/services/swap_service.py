@@ -214,30 +214,36 @@ class SwapService:
             await self._refund_points_offset(session, origin=re_swap)
 
         # 写 1/2/3/4：解绑 + 绑定 + 两块电池状态与位置 + 库存
+        #
+        # 用 **SAVEPOINT** 包住，不能 `session.rollback()`：调用方（API 的 `get_session`、
+        # 测试的 `async with tx()`）在更外层开着事务，把整条连接回滚掉会让外层上下文
+        # 变成 closed transaction（线上实测并发换电直接 500）。savepoint 只丢弃这五条写，
+        # 外层事务仍可用，拒单再用独立事务落库。
         try:
-            await self.repo.end_binding(session, binding["id"])
-            await self.repo.insert_binding(session, vin=body.vin, battery_sn=body.in_battery_sn,
-                                           station_id=station["id"], swap_order_id=order["id"],
-                                           reason="swap")
-            await self.repo.set_battery_state(session, body.out_battery_sn, status="returned",
-                                              station_id=station["id"], bump_cycles=True)
-            await self.repo.set_battery_state(session, body.in_battery_sn, status="leased",
-                                              station_id=None)
-            if re_swap is not None and re_swap["in_battery_sn"]:
-                await self.repo.set_battery_state(session, re_swap["in_battery_sn"],
-                                                  status="returned", station_id=station["id"],
-                                                  bump_complaints=True)
-            # 换出一块 ready → -1；换回的旧电池是 returned，不计入三个计数
-            await self.repo.stock_adjust(session, station_id=station["id"],
-                                         model_code=model["model_code"],
-                                         ready_delta=-1, charging_delta=0, faulty_delta=0)
+            async with session.begin_nested():
+                await self.repo.end_binding(session, binding["id"])
+                await self.repo.insert_binding(session, vin=body.vin,
+                                               battery_sn=body.in_battery_sn,
+                                               station_id=station["id"],
+                                               swap_order_id=order["id"], reason="swap")
+                await self.repo.set_battery_state(session, body.out_battery_sn, status="returned",
+                                                  station_id=station["id"], bump_cycles=True)
+                await self.repo.set_battery_state(session, body.in_battery_sn, status="leased",
+                                                  station_id=None)
+                if re_swap is not None and re_swap["in_battery_sn"]:
+                    await self.repo.set_battery_state(session, re_swap["in_battery_sn"],
+                                                      status="returned", station_id=station["id"],
+                                                      bump_complaints=True)
+                # 换出一块 ready → -1；换回的旧电池是 returned，不计入三个计数
+                await self.repo.stock_adjust(session, station_id=station["id"],
+                                             model_code=model["model_code"],
+                                             ready_delta=-1, charging_delta=0, faulty_delta=0)
         except IntegrityError as e:
             """并发下另一笔换电已经提交（`FOR UPDATE SKIP LOCKED` 只挡住"正在锁"的，
             挡不住"刚提交完"的）：`uq_binding_active` / `uq_binding_battery_active` /
             `station_stock` CHECK 是最后防线（§11.11）。**必须翻译成拒单**——
             站点作业台收到 500 会让人以为没换成而再扫一次，半个绑定留在库里更糟。
             """
-            await session.rollback()          # 事务已废：先回滚，再用独立事务落拒单
             why = type(e.orig).__name__ if e.orig is not None else "IntegrityError"
             return await self._reject(session, principal, station=station, vehicle=vehicle,
                                       body=body, reason="stock_empty", ip=ip,
