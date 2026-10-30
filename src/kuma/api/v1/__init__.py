@@ -18,6 +18,7 @@ from . import (
     orgs,
     points,
     public,
+    shop,
     trips,
     vehicles,
     ws,
@@ -41,5 +42,6 @@ api_router.include_router(audit.router)     # R_AUDIT 只读；查审计本身�
 api_router.include_router(energy.router)    # 换电与电池资产（M15）：scope 按 swap_operator 业务线
 api_router.include_router(points.router)    # 积分余额/流水/可抵额度 + 抵扣规则（没有"扣积分"端点）
 api_router.include_router(leads.router)     # 潜客意向：本人登记 / 经销商跟进 / 平台补派（未登录那份在 public）
+api_router.include_router(shop.router)      # 商城（配件电商）：下单/核销/提货 + 商家货架与双轨库存
 api_router.include_router(fences.router)    # 围栏：写操作只允许 platform
 api_router.include_router(ws.router)

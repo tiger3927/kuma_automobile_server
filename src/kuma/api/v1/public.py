@@ -28,10 +28,12 @@ from ...core.pagination import PageParams
 from ...schemas.commerce import LeadAnonymousIn
 from ...services.lead_service import LeadService
 from ...services.public_service import PublicService
+from ...services.shop_service import ShopService
 
 router = APIRouter(prefix="/public", tags=["public"])
 svc = PublicService()
 leads = LeadService()
+shop = ShopService()
 
 
 @router.get("/vehicle-types")
@@ -54,6 +56,24 @@ async def dealers(session: Db, region_id: str | None = Query(default=None, max_l
                   limit: int = 20, offset: int = 0) -> dict:
     return await svc.dealers(session, region_id=region_id, q=q,
                              page=PageParams(limit=limit, offset=offset))
+
+
+@router.get("/products")
+async def products(session: Db, region_id: str | None = Query(default=None, max_length=2),
+                   product_type: str | None = Query(default=None, max_length=20),
+                   category: str | None = Query(default=None, max_length=50),
+                   q: str | None = Query(default=None, max_length=64),
+                   limit: int = 20, offset: int = 0) -> dict:
+    """在售商品目录（未登录可看）。**价格以库里为准**：列表给的是该商品最低价 `from_price`，
+    具体规格价格在详情页的 skus 里，下单时服务端重新取值，不接受前端传价。"""
+    return await shop.catalog(session, region_id=region_id, product_type=product_type,
+                              category=category, q=q, limit=limit, offset=offset)
+
+
+@router.get("/products/{product_id}")
+async def product_detail(product_id: int, session: Db) -> dict:
+    """商品详情 + 每个 SKU 的可售量与"哪家店有货"（用户得知道去哪提货）。"""
+    return await shop.product(session, product_id=product_id)
 
 
 @router.post("/leads", status_code=201)

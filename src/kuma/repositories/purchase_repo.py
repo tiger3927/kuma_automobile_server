@@ -163,30 +163,37 @@ class PurchaseRepo:
     async def insert_order(self, session: AsyncSession, *, order_no: str, account_id: int,
                            order_type: str, region_id: str, currency: str, amount_cash: int,
                            amount_points: int, collect_mode: str, status: str,
-                           idempotency_key: str) -> dict[str, Any]:
+                           idempotency_key: str,
+                           dealer_org_id: int | None = None,
+                           operator_org_id: int | None = None) -> dict[str, Any]:
+        """`dealer_org_id` 是商城（配件）才有的：积分包是平台自营，没有卖方组织。"""
         row = (await session.execute(text(f"""
             INSERT INTO commerce."order" (order_no, account_id, order_type, region_id, currency,
-                amount_cash, amount_points, collect_mode, status, idempotency_key)
+                amount_cash, amount_points, collect_mode, status, idempotency_key,
+                dealer_org_id, operator_org_id)
             VALUES (:order_no, :account_id, :order_type, :region_id, :currency,
-                    :amount_cash, :amount_points, :collect_mode, :status, :idempotency_key)
+                    :amount_cash, :amount_points, :collect_mode, :status, :idempotency_key,
+                    :dealer_org_id, :operator_org_id)
             RETURNING {ORDER_COLS}
         """), {"order_no": order_no, "account_id": account_id, "order_type": order_type,
                "region_id": region_id, "currency": currency, "amount_cash": amount_cash,
                "amount_points": amount_points, "collect_mode": collect_mode, "status": status,
-               "idempotency_key": idempotency_key, })).mappings().one()
+               "idempotency_key": idempotency_key, "dealer_org_id": dealer_org_id,
+               "operator_org_id": operator_org_id, })).mappings().one()
         await session.flush()
         return dict(row)
 
     async def insert_order_item(self, session: AsyncSession, *, order_id: int, sku_id: int,
                                 product_type: str, qty: int, unit_price: int,
-                                points_cost: int) -> int:
+                                points_cost: int, vin: str | None = None) -> int:
+        """`vin` 可空：配件订单可以指定"给哪台车装"（质保与召回要用），积分包没有车。"""
         oid = (await session.execute(text("""
-            INSERT INTO commerce.order_item (order_id, sku_id, product_type, qty, unit_price,
+            INSERT INTO commerce.order_item (order_id, sku_id, product_type, vin, qty, unit_price,
                                              points_cost)
-            VALUES (:order_id, :sku_id, :product_type, :qty, :unit_price, :points_cost)
+            VALUES (:order_id, :sku_id, :product_type, :vin, :qty, :unit_price, :points_cost)
             RETURNING id
-        """), {"order_id": order_id, "sku_id": sku_id, "product_type": product_type, "qty": qty,
-               "unit_price": unit_price, "points_cost": points_cost})).scalar_one()
+        """), {"order_id": order_id, "sku_id": sku_id, "product_type": product_type, "vin": vin,
+               "qty": qty, "unit_price": unit_price, "points_cost": points_cost})).scalar_one()
         await session.flush()
         return int(oid)
 
@@ -200,12 +207,21 @@ class PurchaseRepo:
         return dict(row) if row else None
 
     async def insert_fulfillment(self, session: AsyncSession, *, order_id: int, type_: str,
-                                 status: str, confirmed_by: int | None) -> int:
+                                 status: str, confirmed_by: int | None,
+                                 pickup_code: str | None = None,
+                                 dealer_org_id: int | None = None,
+                                 delivered_now: bool = True) -> int:
+        """`delivered_now=False` 给实体商品用（下单时建履约单，到店扫码才 `delivered`）；
+        积分包是"支付即交付"，保持默认的 `delivered_at=now()`。
+        """
         fid = (await session.execute(text("""
-            INSERT INTO commerce.fulfillment (order_id, type, status, delivered_at, confirmed_by)
-            VALUES (:order_id, :type, :status, now(), :confirmed_by)
+            INSERT INTO commerce.fulfillment (order_id, type, dealer_org_id, pickup_code,
+                                             status, delivered_at, confirmed_by)
+            VALUES (:order_id, :type, :dealer_org_id, :pickup_code, :status,
+                    CASE WHEN :delivered_now THEN now() END, :confirmed_by)
             RETURNING id
-        """), {"order_id": order_id, "type": type_, "status": status,
+        """), {"order_id": order_id, "type": type_, "dealer_org_id": dealer_org_id,
+               "pickup_code": pickup_code, "status": status, "delivered_now": delivered_now,
                "confirmed_by": confirmed_by})).scalar_one()
         await session.flush()
         return int(fid)

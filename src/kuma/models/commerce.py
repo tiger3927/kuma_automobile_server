@@ -1,8 +1,11 @@
-"""`commerce` schema：映射**积分包购买链路的五张** + **潜客意向 `lead`**（`Task-DataBase.md` §11.2 / 口径 §5.1）。
+"""`commerce` schema：积分包链路（五张）+ 商城链路（`stock` / `stock_unit` / `cart_item`）+ 潜客 `lead`。
 
-`commerce` 其余表（`vehicle_listing` / `stock` / `cart_item` / `order_deposit` /
-`aftersale` / `used_car_report` / `product_review`）尚无写入方，故意不映射——
-映射了没有写入路径的表只会诱导出"看起来已实现"的假接口（`Task-Server.md` §16 C10 同一立场）。
+**商城（配件电商）2026-10-30 接入**：`product` / `sku` / `order` / `order_item` / `fulfillment`
+原本只服务积分包，现在同时服务配件订单（`services/shop_service.py`）；库存双轨见迁移 `0013`：
+`inventory_kind='qty'` 走 `commerce.stock.qty`，`'serial'` 走 `commerce.stock_unit` 一行一件。
+
+仍未映射（无写入方，故意留着，避免"看起来已实现"的假接口，`Task-Server.md` §16 C10）：
+`vehicle_listing` / `order_deposit` / `aftersale` / `used_car_report` / `product_review`。
 
 `lead` 不在 §11.2 的原始 12 张表里，是 2026-10-29 为 guest 角色 A（潜在客户）新增的
 （`Task-Server.md` §18.3，DDL 见迁移 `0012`）：官网/用户端的意向登记要落到一张能被经销商
@@ -26,6 +29,7 @@ from sqlalchemy import (
     CHAR,
     BigInteger,
     DateTime,
+    Integer,
     SmallInteger,
     Text,
     UniqueConstraint,
@@ -58,7 +62,12 @@ class Product(Base):
 
 
 class Sku(Base):
-    """可售单位（价格在这里）。积分包的 sku 由平台配包时自动创建，不手工维护。"""
+    """可售单位（价格在这里）。积分包的 sku 由平台配包时自动创建，不手工维护。
+
+    `inventory_kind`（迁移 0013）：`qty` = 数量库存（`commerce.stock.qty`），
+    `serial` = SN 级台账（`commerce.stock_unit` 一行一件）。按 SKU 声明而不是按商品，
+    因为"电池版"和"普通版"本就是不同 SKU，库存模型跟着可售单位走。
+    """
 
     __tablename__ = "sku"
     __table_args__ = {"schema": "commerce"}
@@ -69,7 +78,64 @@ class Sku(Base):
     attrs: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'"))
     price: Mapped[int] = mapped_column(BigInteger, nullable=False)
     currency: Mapped[str] = mapped_column(CHAR(3), nullable=False)
+    inventory_kind: Mapped[str] = mapped_column(Text, nullable=False,
+                                                server_default=text("'qty'"))
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+
+
+class Stock(Base):
+    """数量库存（`inventory_kind='qty'`）。一行 = 一个 SKU 在一家经销商的现有件数。
+
+    与 `stock_unit` 不是同一口径：这里关心"还有几件"，不关心"是哪几件"。
+    """
+
+    __tablename__ = "stock"
+    __table_args__ = (UniqueConstraint("sku_id", "dealer_org_id"), {"schema": "commerce"})
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    sku_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    dealer_org_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+
+
+class StockUnit(Base):
+    """SN 级库存（`inventory_kind='serial'`）。一行 = 一个实物，状态机在 `shop_service`。
+
+    `in_stock → reserved → sold`（另有 `returned` / `scrapped`）。
+    预留只占用 `order_id + reserved_until`：支付超时由 worker 扫 `idx_stock_unit_reserved` 释放。
+    """
+
+    __tablename__ = "stock_unit"
+    __table_args__ = {"schema": "commerce"}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    sku_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sn: Mapped[str] = mapped_column(Text, nullable=False)
+    dealer_org_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False,
+                                        server_default=text("'in_stock'"))
+    order_id: Mapped[int | None] = mapped_column(BigInteger)
+    order_item_id: Mapped[int | None] = mapped_column(BigInteger)
+    reserved_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 server_default=text("now()"))
+
+
+class CartItem(Base):
+    """购物车（一行 = 一个账号的一个 SKU；同 SKU 改数量而不是加行，靠 UNIQUE 兜住）。"""
+
+    __tablename__ = "cart_item"
+    __table_args__ = (UniqueConstraint("account_id", "sku_id"), {"schema": "commerce"})
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sku_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    qty: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("1"))
 
 
 class Order(Base):
@@ -96,6 +162,9 @@ class Order(Base):
     collect_mode: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True)
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
                                                  server_default=text("now()"))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

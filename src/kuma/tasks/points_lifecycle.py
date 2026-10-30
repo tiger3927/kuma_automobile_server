@@ -26,11 +26,13 @@ from ..core.db import tx
 from ..core.logging import get_logger
 from ..services.points_service import PointsService
 from ..services.purchase_service import PurchaseService
+from ..services.shop_service import ShopService
 
 log = get_logger("tasks.points_lifecycle")
 
 _points = PointsService()
 _purchase = PurchaseService()
+_shop = ShopService()
 
 
 async def expire(*, limit: int = 500) -> dict[str, Any]:
@@ -58,9 +60,22 @@ async def liability_snapshot(*, snapshot_date: date | None = None) -> dict[str, 
 
 
 async def pay_timeout(*, limit: int = 200) -> dict[str, Any]:
-    """超时支付单关单（§5.2 `pay_timeout`）。"""
+    """超时支付单关单（§5.2 `pay_timeout`）+ 商城订单超时取消与库存释放。
+
+    商城那一半必须在同一个 job 里：商城订单超时不只是支付单过期，
+    还要**取消订单并放回库存/SN**，否则货被一张死单永久占着。
+    两条链各自事务，互不影响（一边失败不该连累另一边）。
+    """
     async with tx() as session:
         out = await _purchase.close_expired_pay_orders(session, limit=limit)
     if out["closed"]:
         log.info("pay_order.timeout", closed=out["closed"], scanned=out["scanned"])
-    return out
+    try:
+        async with tx() as session:
+            shop_out = await _shop.close_expired(session, limit=limit)
+    except Exception:                     # 商城超时清理失败不能让积分侧回滚重跑
+        log.exception("shop.expire.failed")
+        shop_out = {"error": True}
+    if shop_out.get("cancelled") or shop_out.get("units_released"):
+        log.info("shop.order.timeout", **shop_out)
+    return {**out, "shop": shop_out}
