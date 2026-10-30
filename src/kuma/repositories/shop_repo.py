@@ -128,7 +128,7 @@ class ShopRepo:
                                  limit: int = 10) -> list[dict[str, Any]]:
         """哪些经销商有这个 SKU 的货（用户下单要选店，否则不知道去哪提货）。"""
         rows = (await session.execute(text("""
-            SELECT o.id AS dealer_org_id, o.name, o.address, o.city,
+            SELECT o.id AS dealer_org_id, o.name, o.address, o.phone,
                    COALESCE(st.qty, 0) AS qty,
                    (SELECT COUNT(*) FROM commerce.stock_unit u
                      WHERE u.sku_id = :sku AND u.dealer_org_id = o.id
@@ -148,7 +148,7 @@ class ShopRepo:
     async def org_by_id(self, session: AsyncSession, org_id: int) -> dict[str, Any] | None:
         """卖方组织（下单要确认"这家店真的存在且在营业"，不然订单记在一个空组织上）。"""
         row = (await session.execute(text("""
-            SELECT id, name, org_type, region_id, status, address, city
+            SELECT id, name, org_type, region_id, status, address, phone
               FROM core.org WHERE id = :id
         """), {"id": org_id})).mappings().one_or_none()
         return dict(row) if row else None
