@@ -279,18 +279,23 @@ class ShopRepo:
 
     async def release_units_of_order(self, session: AsyncSession, order_id: int) -> int:
         """取消/超时：把该单占着的 SN 放回在库（只动 `reserved`，`sold` 不碰）。"""
-        res = await session.execute(text("""
+        ids = (await session.execute(text("""
             UPDATE commerce.stock_unit
                SET status = 'in_stock', order_id = NULL, order_item_id = NULL,
                    reserved_until = NULL, updated_at = now()
              WHERE order_id = :o AND status = 'reserved'
-        """), {"o": order_id})
+            RETURNING id
+        """), {"o": order_id})).scalars().all()
         await session.flush()
-        return int(res.rowcount or 0)
+        return len(ids)
 
     async def release_expired_units(self, session: AsyncSession, *, limit: int = 500) -> int:
-        """worker 定时任务：支付超时的预留放回在库。"""
-        res = await session.execute(text("""
+        """worker 定时任务：支付超时的预留放回在库。
+
+        用 `RETURNING id` 数行数，不用 `Result.rowcount`——SQLAlchemy 的 `Result` 上没有这个属性
+        （`core/deps.py:134` 记着同一条坑），`mypy` 也会直接报 attr-defined。
+        """
+        ids = (await session.execute(text("""
             UPDATE commerce.stock_unit
                SET status = 'in_stock', order_id = NULL, order_item_id = NULL,
                    reserved_until = NULL, updated_at = now()
@@ -300,9 +305,10 @@ class ShopRepo:
                     AND reserved_until < now()
                   LIMIT :limit
              )
-        """), {"limit": limit})
+            RETURNING id
+        """), {"limit": limit})).scalars().all()
         await session.flush()
-        return int(res.rowcount or 0)
+        return len(ids)
 
     async def units_page(self, session: AsyncSession, *, sku_id: int | None = None,
                          dealer_org_id: int | None = None, status: str | None = None,
@@ -392,16 +398,17 @@ class ShopRepo:
     async def cart_clear(self, session: AsyncSession, account_id: int,
                          sku_ids: list[int] | None = None) -> int:
         if sku_ids:
-            res = await session.execute(text("""
+            ids = (await session.execute(text("""
                 DELETE FROM commerce.cart_item
                  WHERE account_id = :acc AND sku_id = ANY(:ids)
-            """), {"acc": account_id, "ids": sku_ids})
+                RETURNING id
+            """), {"acc": account_id, "ids": sku_ids})).scalars().all()
         else:
-            res = await session.execute(text("""
-                DELETE FROM commerce.cart_item WHERE account_id = :acc
-            """), {"acc": account_id})
+            ids = (await session.execute(text("""
+                DELETE FROM commerce.cart_item WHERE account_id = :acc RETURNING id
+            """), {"acc": account_id})).scalars().all()
         await session.flush()
-        return int(res.rowcount or 0)
+        return len(ids)
 
     # ══ 订单 ═════════════════════════════════════════════════════════════════
     async def order_by_no(self, session: AsyncSession, order_no: str) -> dict[str, Any] | None:
@@ -537,18 +544,24 @@ class ShopRepo:
 
     async def confirm_fulfillment(self, session: AsyncSession, *, fulfillment_id: int,
                                   account_id: int) -> bool:
-        res = await session.execute(text("""
+        fid = (await session.execute(text("""
             UPDATE commerce.fulfillment
                SET status = 'delivered', delivered_at = now(), confirmed_by = :acc
              WHERE id = :id AND status <> 'delivered'
-        """), {"id": fulfillment_id, "acc": account_id})
+            RETURNING id
+        """), {"id": fulfillment_id, "acc": account_id})).scalar_one_or_none()
         await session.flush()
-        return bool(res.rowcount)
+        return fid is not None
 
     async def sales_summary(self, session: AsyncSession, *, dealer_org_id: int | None = None
                             ) -> dict[str, Any]:
         """商家看板：已收金额 / 待收款单数 / 待提货单数。**不猜口径**——
-        金额只统计 `paid`/`completed`（`created` 是没付钱的单，算进去就是虚增营收）。"""
+        金额只统计 `paid`/`completed`（`created` 是没付钱的单，算进去就是虚增营收）。
+
+        `:dealer::bigint` 的显式 cast 是必须的：`text()` 绑定不带列类型，
+        写成 `(:dealer IS NULL OR ...)` asyncpg 会报 "could not determine data type"，
+        而且这种错只有连真库才会暴露（`Task-Server.md` §7 铁律 7）。
+        """
         row = (await session.execute(text("""
             SELECT COUNT(*) FILTER (WHERE o.status = 'created') AS unpaid_orders,
                    COUNT(*) FILTER (WHERE o.status = 'paid') AS paid_orders,
@@ -559,7 +572,7 @@ class ShopRepo:
                        WHERE o.status = 'created'), 0)::bigint AS pending_minor
               FROM commerce."order" o
              WHERE o.order_type = ANY(:types)
-               AND (:dealer IS NULL OR o.dealer_org_id = :dealer)
+               AND (:dealer::bigint IS NULL OR o.dealer_org_id = :dealer::bigint)
         """), {"types": ["part", "service"], "dealer": dealer_org_id})).mappings().one()
         return dict(row)
 
