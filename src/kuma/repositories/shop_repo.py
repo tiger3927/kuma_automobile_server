@@ -556,13 +556,18 @@ class ShopRepo:
         await session.flush()
         return fid is not None
 
-    async def sales_summary(self, session: AsyncSession, *, dealer_org_id: int | None = None
+    async def sales_summary(self, session: AsyncSession, *, dealer_org_ids: list[int] | None = None
                             ) -> dict[str, Any]:
         """商家看板：已收金额 / 待收款单数 / 待提货单数。**不猜口径**——
         金额只统计 `paid`/`completed`（`created` 是没付钱的单，算进去就是虚增营收）。
 
-        `:dealer::bigint` 的显式 cast 是必须的：`text()` 绑定不带列类型，
-        写成 `(:dealer IS NULL OR ...)` asyncpg 会报 "could not determine data type"，
+        **口径必须由调用方给死**（`dealer_org_ids=None` = 全平台，只有平台/监管能走到）：
+        这里原来是单个 `dealer_org_id`，而 service 对非平台身份直接透传 `None`，
+        于是任意登录用户（consumer 也有 `order:read`）都能读到**全站 GMV**（2026-10-30 实测）。
+        改成显式列表后，多店员工也不必被硬塞成单店口径。
+
+        `CAST(:orgs AS bigint[])` 的显式 cast 是必须的：`text()` 绑定不带列类型，
+        写成 `(:orgs IS NULL OR ...)` asyncpg 会报 "could not determine data type"，
         而且这种错只有连真库才会暴露（`Task-Server.md` §7 铁律 7）。
         """
         row = (await session.execute(text("""
@@ -575,9 +580,10 @@ class ShopRepo:
                        WHERE o.status = 'created'), 0)::bigint AS pending_minor
               FROM commerce."order" o
              WHERE o.order_type = ANY(:types)
-               AND (CAST(:dealer AS bigint) IS NULL
-                    OR o.dealer_org_id = CAST(:dealer AS bigint))
-        """), {"types": ["part", "service"], "dealer": dealer_org_id})).mappings().one()
+               AND (CAST(:orgs AS bigint[]) IS NULL
+                    OR o.dealer_org_id = ANY(CAST(:orgs AS bigint[])))
+        """), {"types": ["part", "service"],
+               "orgs": dealer_org_ids})).mappings().one()
         return dict(row)
 
 

@@ -559,9 +559,25 @@ class ShopService:
 
     async def summary(self, session: AsyncSession, principal: Principal, *,
                       dealer_org_id: int | None = None) -> dict[str, Any]:
+        """商家看板。**非平台身份必须落到自己店上**（见 `sales_summary` 的口径注）：
+
+        - 平台/监管：`dealer_org_id` 可指定某店，不给就是全平台；
+        - 经销商员工：默认自有门店集合，显式指定别家 → `org_out_of_scope`；
+        - 其他身份（consumer/owner/driver）：**全 0**。`order:read` 是共享动作，
+          给他们全平台口径等于把全站 GMV 漏出去。
+        """
         principal.require("order", "read")
-        org = None if principal.is_platform or principal.is_regulator else dealer_org_id
-        return await self.repo.sales_summary(session, dealer_org_id=org)
+        if principal.is_platform or principal.is_regulator:
+            orgs: list[int] | None = [dealer_org_id] if dealer_org_id else None
+        else:
+            mine = sorted(set(principal.org_ids_for_line("dealer") or principal.org_ids()))
+            if not mine:
+                return {"unpaid_orders": 0, "paid_orders": 0, "completed_orders": 0,
+                        "revenue_minor": 0, "pending_minor": 0}
+            if dealer_org_id and dealer_org_id not in mine:
+                raise Forbidden("这不是你名下的门店", code="org_out_of_scope")
+            orgs = [dealer_org_id] if dealer_org_id else mine
+        return await self.repo.sales_summary(session, dealer_org_ids=orgs)
 
     # ══ worker ═══════════════════════════════════════════════════════════════
     async def close_expired(self, session: AsyncSession, *, limit: int = 200
