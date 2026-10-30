@@ -415,8 +415,17 @@ class ShopRepo:
 
     # ══ 订单 ═════════════════════════════════════════════════════════════════
     async def order_by_no(self, session: AsyncSession, order_no: str) -> dict[str, Any] | None:
+        """单据行 + 门店名。
+
+        门店名用**标量子查询**取而不是 JOIN：`ORDER_COLS` 是无限定名的列（`id`/`status`/`created_at`…），
+        一旦 JOIN `core.org` 这些列全部歧义，去改 ORDER_COLS 又会波及所有其它查询。
+        详情页要显示"去哪家店提货"，之前只有列表接口带这个名字，详情页是 `—`。
+        """
         row = (await session.execute(text(f"""
-            SELECT {ORDER_COLS} FROM commerce."order" WHERE order_no = :no
+            SELECT {ORDER_COLS},
+                   (SELECT og.name FROM core.org og
+                     WHERE og.id = commerce."order".dealer_org_id) AS dealer_name
+              FROM commerce."order" WHERE order_no = :no
         """), {"no": order_no})).mappings().one_or_none()
         return dict(row) if row else None
 
