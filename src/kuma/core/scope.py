@@ -88,7 +88,11 @@ PERMISSIONS: dict[str, dict[IdentityType, set[str]]] = {
              "platform_staff": _RW},
     R_PRODUCT: {
         "consumer": _R, "owner": _R, "driver": _R,
-        "dealer_staff": _RW, "manufacturer_staff": _RW, "platform_staff": {"review"}},
+        "dealer_staff": _RW, "manufacturer_staff": _RW,
+        # 平台要**能读**：商城库存与 SN 台账页是平台审核/巡检/客服代查的入口，
+        # 只给 `review` 会让 admin 端平台账号打不开库存页（实测 403 product:read）。
+        # `review` 仍只有平台有（商品合规审核），`write` 留给卖方。
+        "platform_staff": _R | {"review"}, "regulator": _R},
     R_ORDER: {
         "consumer": _RW, "owner": _RW, "driver": _R, "dealer_staff": _RW,
         "manufacturer_staff": _R, "operator_staff": _R, "regulator": _R,
