@@ -232,15 +232,18 @@ class ShopRepo:
         """
         if not sns:
             return []
-        rows = (await session.execute(
-            text("""
-                INSERT INTO commerce.stock_unit (sku_id, sn, dealer_org_id, status, note)
-                VALUES (:sku, :sn, :dealer, 'in_stock', :note)
-                ON CONFLICT (sku_id, sn) DO NOTHING
-                RETURNING sn
-            """),
-            [{"sku": sku_id, "sn": sn, "dealer": dealer_org_id, "note": note} for sn in sns],
-        )).scalars().all()
+        # **一条 INSERT ... SELECT unnest(...)**，不是 executemany：
+        # SQLAlchemy 的 executemany 模式下结果集被关闭，`RETURNING` 取不到行
+        # （实测 `ResourceClosedError: This result object does not return rows`），
+        # 而"哪些 SN 真的插进去了"必须靠 RETURNING——否则前端看到的是"全部成功"。
+        rows = (await session.execute(text("""
+            INSERT INTO commerce.stock_unit (sku_id, sn, dealer_org_id, status, note)
+            SELECT :sku, sn, :dealer, 'in_stock', :note
+              FROM unnest(CAST(:sns AS text[])) AS sn
+            ON CONFLICT (sku_id, sn) DO NOTHING
+            RETURNING sn
+        """), {"sku": sku_id, "dealer": dealer_org_id, "note": note,
+               "sns": list(sns)})).scalars().all()
         await session.flush()
         return [str(r) for r in rows]
 
