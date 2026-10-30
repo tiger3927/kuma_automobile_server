@@ -49,8 +49,10 @@ from ..repositories.shop_repo import ShopRepo
 from .dual_control import require_co_approver
 from .purchase_service import OPEN_PAY_STATUSES, PAY_TTL, PROVIDER_QR_TRANSFER
 
-#: 商城订单类型（`vehicle`/`used_vehicle` 走买车链 M9，`points_*` 走积分包）
+#: 商城**可下单**的订单类型（`vehicle`/`used_vehicle` 走买车链 M9，`points_*` 走积分包）
 SHOP_ORDER_TYPES = ("part", "service")
+#: 目录**可展示**的产品类型：整车只有指导价、没有 SKU，成交走询价（`commerce.lead`）
+CATALOG_TYPES = (*SHOP_ORDER_TYPES, "coupon", "vehicle", "used_vehicle")
 #: 单笔订单最多行数（购物车上限，防止一次结 500 个 SKU 把库存锁半天）
 MAX_LINES = 20
 
@@ -65,8 +67,8 @@ class ShopService:
                       product_type: str | None = None, category: str | None = None,
                       q: str | None = None, limit: int = 20, offset: int = 0
                       ) -> dict[str, Any]:
-        if product_type is not None and product_type not in (*SHOP_ORDER_TYPES, "coupon"):
-            raise ValidationFailed(f"product_type 必须在 {list(SHOP_ORDER_TYPES)} 或 coupon",
+        if product_type is not None and product_type not in CATALOG_TYPES:
+            raise ValidationFailed(f"product_type 必须在 {list(CATALOG_TYPES)} 之内",
                                    code="bad_product_type")
         items, total = await self.repo.products_page(
             session, region_id=region_id, product_type=product_type, category=category,

@@ -35,6 +35,9 @@ class LeadContext(BaseModel):
     utm: str | None = Field(default=None, max_length=120, description="utm_source/medium/campaign 拼接")
     lat: float | None = Field(default=None, ge=-90, le=90)
     lng: float | None = Field(default=None, ge=-180, le=180)
+    #: 商城整车询价：商品 id（`commerce.product`）。整车没有 SKU，成交靠线索，
+    #: 不记下"问的是哪台车"，跟进人只能靠 note 猜。配件下单走订单，不用这个字段。
+    product_id: int | None = Field(default=None, ge=1, description="询价的商品 id（整车）")
 
 
 class LeadIn(BaseModel):

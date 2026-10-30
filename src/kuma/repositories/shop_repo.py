@@ -65,7 +65,7 @@ class ShopRepo:
             p["q"] = f"%{q}%"
         sql = f"""
             SELECT p.id, p.name, p.product_type, p.category, p.type_code, p.currency,
-                   p.region_id, p.msrp, p.status,
+                   p.region_id, p.msrp, p.status, p.image_url, p.attrs,
                    COUNT(*) OVER() AS total,
                    (SELECT MIN(s.price) FROM commerce.sku s
                      WHERE s.product_id = p.id AND s.status = 'active') AS from_price,
@@ -83,7 +83,7 @@ class ShopRepo:
                              ) -> dict[str, Any] | None:
         row = (await session.execute(text("""
             SELECT id, name, product_type, category, type_code, manufacturer_org_id, msrp,
-                   currency, region_id, status, created_at
+                   currency, region_id, status, created_at, image_url, attrs
               FROM commerce.product WHERE id = :id
         """), {"id": product_id})).mappings().one_or_none()
         return dict(row) if row else None
