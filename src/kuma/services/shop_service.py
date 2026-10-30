@@ -434,14 +434,15 @@ class ShopService:
     async def create_product(self, session: AsyncSession, principal: Principal, *,
                              name: str, product_type: str, category: str | None,
                              currency: str, region_id: str | None, msrp: int | None,
-                             manufacturer_org_id: int | None, ip: str | None = None
-                             ) -> dict[str, Any]:
+                             manufacturer_org_id: int | None,
+                             image_url: str | None = None, attrs: dict[str, Any] | None = None,
+                             ip: str | None = None) -> dict[str, Any]:
         principal.require("product", "write")
         org_id = self._seller_org(principal, manufacturer_org_id)
         p = await self.repo.insert_product(
             session, name=name, product_type=product_type, category=category,
             currency=currency, region_id=region_id, msrp=msrp,
-            manufacturer_org_id=org_id, status="active")
+            manufacturer_org_id=org_id, image_url=image_url, attrs=attrs, status="active")
         await write_audit(session, actor=principal, action="shop.product.create",
                           resource_type="product", resource_id=p["id"],
                           after={"name": name, "type": product_type, "org_id": org_id}, ip=ip)

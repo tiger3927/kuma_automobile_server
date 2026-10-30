@@ -132,7 +132,8 @@ async def create_product(body: ProductIn, request: Request, principal: Principal
     return await svc.create_product(
         session, principal, name=body.name, product_type=body.product_type,
         category=body.category, currency=body.currency, region_id=body.region_id,
-        msrp=body.msrp, manufacturer_org_id=body.manufacturer_org_id, ip=_ip(request))
+        msrp=body.msrp, manufacturer_org_id=body.manufacturer_org_id,
+        image_url=body.image_url, attrs=body.attrs, ip=_ip(request))
 
 
 @router.post("/skus", status_code=201)

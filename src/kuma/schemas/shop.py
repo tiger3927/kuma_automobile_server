@@ -12,8 +12,10 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-#: 与 DDL 的 `product.product_type` CHECK 逐字一致（`vehicle`/`used_vehicle` 走买车链，暂不开放）
-SHOP_PRODUCT_TYPES = ("part", "service", "coupon")
+#: 与 DDL 的 `product.product_type` CHECK 逐字一致。
+#: `vehicle` = 整车：**没有 SKU**（只有指导价 + 参数），成交走询价（`commerce.lead`）；
+#: `used_vehicle` 走二手车链（M14），暂不开放。
+SHOP_PRODUCT_TYPES = ("part", "service", "coupon", "vehicle")
 #: 与 `commerce.sku.inventory_kind` CHECK 一致
 INVENTORY_KINDS = ("qty", "serial")
 
@@ -22,12 +24,17 @@ class ProductIn(BaseModel):
     """建商品（`product:write`，经销商/厂家/平台）。"""
 
     name: str = Field(min_length=1, max_length=200)
-    product_type: Literal["part", "service", "coupon"] = "part"
-    category: str | None = Field(default=None, max_length=50, description="制动/轮胎/电池/保养…")
+    product_type: Literal["part", "service", "coupon", "vehicle"] = "part"
+    category: str | None = Field(default=None, max_length=80, description="制动/轮胎/电池/保养…")
     currency: str = Field(default="THB", pattern="^[A-Z]{3}$")
     region_id: str | None = Field(default=None, pattern="^[A-Z]{2}$")
-    msrp: int | None = Field(default=None, ge=0, description="建议零售价（最小货币单位）")
+    msrp: int | None = Field(default=None, ge=0,
+                             description="指导价/建议零售价（最小货币单位）；整车只有指导价")
     manufacturer_org_id: int | None = None
+    image_url: str | None = Field(default=None, max_length=300,
+                                 description="站内路径（/vehicles/kuma310.jpg），前缀由前端各自补")
+    attrs: dict = Field(default_factory=dict,
+                        description='整车营销属性：{"line","model","price_kind","specs":[...]}')
 
 
 class SkuIn(BaseModel):

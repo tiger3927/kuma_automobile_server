@@ -170,14 +170,17 @@ class ShopRepo:
     async def insert_product(self, session: AsyncSession, *, name: str, product_type: str,
                              category: str | None, currency: str, region_id: str | None,
                              msrp: int | None, manufacturer_org_id: int | None,
+                             image_url: str | None = None, attrs: dict[str, Any] | None = None,
                              status: str = "active") -> dict[str, Any]:
         row = (await session.execute(text("""
             INSERT INTO commerce.product (name, product_type, category, currency, region_id,
-                                         msrp, manufacturer_org_id, status)
-            VALUES (:name, :ptype, :cat, :cur, :region, :msrp, :mfr, :status)
+                                         msrp, manufacturer_org_id, image_url, attrs, status)
+            VALUES (:name, :ptype, :cat, :cur, :region, :msrp, :mfr, :img,
+                    CAST(:attrs AS jsonb), :status)
             RETURNING id, name, product_type, category, currency, region_id, status, created_at
         """), {"name": name, "ptype": product_type, "cat": category, "cur": currency,
                "region": region_id, "msrp": msrp, "mfr": manufacturer_org_id,
+               "img": image_url, "attrs": json.dumps(attrs or {}),
                "status": status})).mappings().one()
         await session.flush()
         return dict(row)
