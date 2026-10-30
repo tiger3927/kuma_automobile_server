@@ -575,7 +575,8 @@ class ShopRepo:
                        WHERE o.status = 'created'), 0)::bigint AS pending_minor
               FROM commerce."order" o
              WHERE o.order_type = ANY(:types)
-               AND (:dealer::bigint IS NULL OR o.dealer_org_id = :dealer::bigint)
+               AND (CAST(:dealer AS bigint) IS NULL
+                    OR o.dealer_org_id = CAST(:dealer AS bigint))
         """), {"types": ["part", "service"], "dealer": dealer_org_id})).mappings().one()
         return dict(row)
 
