@@ -252,7 +252,9 @@ class ShopService:
         order["units"] = await self.repo.order_units(session, int(order["id"]))
         order["fulfillments"] = await self.repo.fulfillments_of_order(session, int(order["id"]))
         order["vouchers"] = await self.repo.order_vouchers(session, int(order["id"]))
-        order["pay_order"] = await self.prepo.pay_order_for_order(session, int(order["id"]))
+        pay = await self.prepo.pay_order_for_order(session, int(order["id"]))
+        order["pay_order"] = pay
+        order["pay_instructions"] = await self._pay_instructions(session, order, pay)
         return order
 
     async def upload_voucher(self, session: AsyncSession, principal: Principal, *,
@@ -606,6 +608,31 @@ class ShopService:
         return {"scanned": len(rows), "cancelled": closed, "units_released": released}
 
     # ══ 内部 ═════════════════════════════════════════════════════════════════
+    async def _pay_instructions(self, session: AsyncSession, order: dict[str, Any],
+                                pay: dict[str, Any] | None) -> dict[str, Any] | None:
+        """订单详情里的"钱转到哪"：**只有 `created` 才给**（付完再显示账户等于诱导重复转账）。
+
+        用下单时实际选中的渠道（`pay.channel_id`），不按当前配置重算——
+        结算配置改了之后，用户仍要按他下单时看到的那条付款，否则对账找不到这笔钱。
+
+        没有这个回显时，`pay_instructions` 只活在下单响应里：用户一刷新订单页就不知道该转给谁。
+        """
+        if pay is None or order["status"] != "created" or pay.get("channel_id") is None:
+            return None
+        ch = await self.prepo.channel_by_id(session, int(pay["channel_id"]))
+        if ch is None:
+            return None
+        return {
+            "channel_code": ch["channel_code"],
+            "provider_type": ch["provider_type"],
+            "account_entity": ch["account_entity"],
+            "channel_id": int(ch["id"]),
+            "amount": int(pay["amount"]),
+            "currency": str(pay["currency"]),
+            "expires_at": pay["expires_at"],
+            "note": "转账后回填流水号，平台核销通过后到店提货",
+        }
+
     async def _release(self, session: AsyncSession, order: dict[str, Any]) -> None:
         """归还库存（取消/超时的唯一出口）：SN 回在库，数量库存按原数量加回。"""
         await self.repo.release_units_of_order(session, int(order["id"]))

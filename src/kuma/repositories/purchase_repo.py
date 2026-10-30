@@ -246,6 +246,21 @@ class PurchaseRepo:
                "cur": json.dumps([currency])})).mappings().one_or_none()
         return dict(row) if row else None
 
+    async def channel_by_id(self, session: AsyncSession, channel_id: int) -> dict[str, Any] | None:
+        """按 id 取收款渠道。
+
+        为什么需要：`channel_for` 只能"按地区+币种现查一条"，而**已存在的订单**要回显
+        "钱转到哪"必须用它下单时实际选中的那条（后来改了渠道配置，不能让用户按新配置付款，
+        否则对账找不到这笔钱）。
+        """
+        row = (await session.execute(text("""
+            SELECT id, channel_code, provider_type, collect_mode, account_entity,
+                   fee_rule, config_version
+              FROM fin.payment_channel
+             WHERE id = :id
+        """), {"id": channel_id})).mappings().one_or_none()
+        return dict(row) if row else None
+
     async def insert_pay_order(self, session: AsyncSession, *, pay_no: str, order_id: int,
                                provider: str, channel_id: int | None, amount: int,
                                currency: str, status: str,
